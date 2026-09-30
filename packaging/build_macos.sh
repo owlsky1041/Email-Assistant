@@ -63,8 +63,40 @@ if [ ! -d "$APP_BUNDLE" ]; then
   exit 1
 fi
 
-echo "==> 冒烟测试"
-./dist/email-assistant/email-assistant --version
+echo "==> 冒烟测试（隔离环境，验证产物自包含）"
+SMOKE_HOME="$(mktemp -d)"
+# 注意：必须把 EMAIL_ASSISTANT_HOME 写进 env 的参数里。
+# `VAR=x env -i ...` 会被 env -i 清空，导致烟测把数据写进包体。
+ISO_ENV=(env -i "PATH=/usr/bin:/bin" "HOME=${SMOKE_HOME}" "EMAIL_ASSISTANT_HOME=${SMOKE_HOME}")
+BIN=./dist/email-assistant/email-assistant
+
+"${ISO_ENV[@]}" "$BIN" init --non-interactive >/dev/null
+"${ISO_ENV[@]}" "$BIN" --version
+"${ISO_ENV[@]}" "$BIN" doctor --json > "$SMOKE_HOME/doctor.json" 2>/dev/null || true
+
+"$PY" - "$SMOKE_HOME/doctor.json" <<'PYCHECK'
+import json, sys
+checks = json.load(open(sys.argv[1], encoding="utf-8"))["checks"]
+by_name = {c["name"]: c for c in checks}
+required = [
+    "SQLite 可用", "FTS5 全文检索", "数据库完整性",
+    "归档目录可写", "依赖 imap_tools", "依赖 fastapi",
+    "依赖 cryptography", "依赖 bs4", "依赖 markdownify",
+]
+failed = [n for n in required if not by_name.get(n, {}).get("ok")]
+if failed:
+    print("    X 关键检查未通过：" + ", ".join(failed))
+    sys.exit(1)
+print("    OK 关键检查全部通过")
+for n in ("可选依赖 onnxruntime", "可选依赖 chromadb", "可选依赖 pystray"):
+    print("      " + ("OK " if by_name.get(n, {}).get("ok") else "-- ") + n)
+PYCHECK
+if [ $? -ne 0 ]; then
+  echo "!! 冒烟测试失败，中止打包"
+  rm -rf "$SMOKE_HOME"
+  exit 1
+fi
+rm -rf "$SMOKE_HOME"
 
 # ---- 3. 代码签名（可选但强烈建议）----------------------------------------
 if [ -n "${CODESIGN_IDENTITY:-}" ]; then
@@ -99,13 +131,22 @@ else
   echo "    (跳过 DMG：未安装 create-dmg，可 brew install create-dmg)"
 fi
 
-# ---- 4.5 清理包内运行时残留 ----------------------------------------------
+# ---- 4.2 清理包内运行时残留 ----------------------------------------------
 # 发行包绝不能带构建机的配置 / 数据库 / 日志
 echo "==> 清理包内运行时残留"
 rm -rf dist/email-assistant/config dist/email-assistant/data dist/email-assistant/logs
 rm -rf "$APP_BUNDLE/Contents/MacOS/config" "$APP_BUNDLE/Contents/MacOS/data" \
        "$APP_BUNDLE/Contents/MacOS/logs"
 find dist/email-assistant -name "*.tmp" -delete 2>/dev/null || true
+
+# ---- 4.3 打包 .app ------------------------------------------------------
+# .app 是**目录**，不能作为 artifact 直接上传（上传路径只匹配文件）。
+# 必须用 ditto 打成 zip：它保留权限位与符号链接，
+# 而普通 zip/tar 会破坏 .app 内的 Frameworks 结构，解压后无法运行。
+APP_ZIP="dist/EmailAssistant-${VERSION}-macos-${ARCH}.app.zip"
+echo "==> 打包应用包 ${APP_ZIP}"
+ditto -c -k --keepParent "$APP_BUNDLE" "$APP_ZIP"
+echo "    → $APP_ZIP ($(du -h "$APP_ZIP" | cut -f1))"
 
 # ---- 5. 命令行版 tar.gz ---------------------------------------------------
 TARBALL="dist/email-assistant-${VERSION}-macos-${ARCH}.tar.gz"

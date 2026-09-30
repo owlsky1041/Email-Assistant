@@ -251,10 +251,17 @@ jobs:
           set +e
           case "$RUNNER_OS" in
             Linux)
+              # appimagetool 只影响是否额外出 AppImage；装不上也已有 tar.gz 兜底
+              curl -sSL -o /usr/local/bin/appimagetool \
+                https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+                && chmod +x /usr/local/bin/appimagetool \
+                || echo "!! appimagetool 下载失败，将跳过 AppImage"
               chmod +x packaging/build_linux.sh
               ./packaging/build_linux.sh > build.log 2>&1
               ;;
             macOS)
+              # create-dmg 只影响是否额外出 .dmg；装不上也已有 .app.zip 兜底
+              brew install create-dmg > /dev/null 2>&1 || echo "!! create-dmg 安装失败，将跳过 .dmg"
               chmod +x packaging/build_macos.sh
               ./packaging/build_macos.sh > build.log 2>&1
               ;;
