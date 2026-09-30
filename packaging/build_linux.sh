@@ -162,9 +162,29 @@ EOF
     cp packaging/icon.png "$APPDIR/email-assistant.png"
   fi
 
-  ARCH="$ARCH" appimagetool "$APPDIR" "dist/邮件管理助手-${VERSION}-${ARCH}.AppImage" 2>/dev/null \
-    && echo "    → dist/邮件管理助手-${VERSION}-${ARCH}.AppImage" \
-    || echo "    ! AppImage 构建失败（不影响 tar.gz）"
+  # appimagetool 自身就是一个 AppImage，正常执行依赖 FUSE。
+  # 而 CI 容器/精简 runner 往往没有 FUSE，直接运行会报
+  #   "failed to open elf at /lib64/ld-linux-x86-64.so.2" 之类错误。
+  # 因此先试直接运行，失败则解包后运行（--appimage-extract-and-run 的等价做法）。
+  run_appimagetool() {
+    if ARCH="$ARCH" appimagetool "$@" 2>/dev/null; then
+      return 0
+    fi
+    echo "    (appimagetool 直接运行失败，尝试解包运行 —— 通常是缺少 FUSE)"
+    if appimagetool --appimage-extract >/dev/null 2>&1 && [ -x squashfs-root/AppRun ]; then
+      ARCH="$ARCH" ./squashfs-root/AppRun "$@"
+      local rc=$?
+      rm -rf squashfs-root
+      return $rc
+    fi
+    return 1
+  }
+
+  if run_appimagetool "$APPDIR" "dist/邮件管理助手-${VERSION}-${ARCH}.AppImage"; then
+    echo "    → dist/邮件管理助手-${VERSION}-${ARCH}.AppImage"
+  else
+    echo "    ! AppImage 构建失败（不影响 tar.gz）"
+  fi
 else
   echo "    (跳过 AppImage：未安装 appimagetool)"
 fi

@@ -251,11 +251,16 @@ jobs:
           set +e
           case "$RUNNER_OS" in
             Linux)
-              # appimagetool 只影响是否额外出 AppImage；装不上也已有 tar.gz 兜底
-              curl -sSL -o /usr/local/bin/appimagetool \
-                https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
-                && chmod +x /usr/local/bin/appimagetool \
-                || echo "!! appimagetool 下载失败，将跳过 AppImage"
+              # appimagetool 只影响是否额外出 AppImage；装不上也已有 tar.gz 兜底。
+              # 注意：它自身是 AppImage，运行依赖 FUSE，脚本里已做解包回退。
+              if curl -sSL --retry 3 --max-time 180 \
+                   -o /usr/local/bin/appimagetool \
+                   https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage; then
+                chmod +x /usr/local/bin/appimagetool
+                echo "appimagetool 下载成功 ($(du -h /usr/local/bin/appimagetool | cut -f1))"
+              else
+                echo "!! appimagetool 下载失败，将跳过 AppImage"
+              fi
               chmod +x packaging/build_linux.sh
               ./packaging/build_linux.sh > build.log 2>&1
               ;;
