@@ -82,6 +82,12 @@ def create_app(context: AppContext) -> FastAPI:
     app.state.sync_lock = threading.Lock()
     app.state.sync_thread = None
 
+    # 设置界面（可改写配置与授权码）。仅在回环监听时注册，
+    # 且所有写操作都要求一次性令牌 —— 详见 settings_api 的模块说明。
+    from .settings_api import register_settings
+
+    app.state.setup_token = register_settings(app, context)
+
     if config.api.cors_origins:
         app.add_middleware(
             CORSMiddleware,

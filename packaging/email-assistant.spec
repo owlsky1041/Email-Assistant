@@ -73,6 +73,15 @@ def _collect(package: str, *, submodules: bool = True) -> None:
     print(f"[spec] 已收集 {package}")
 
 
+# 设置界面 HTML：位于 src/webui/ 包内，属于**数据文件**，
+# PyInstaller 的静态分析不会收集，必须显式声明，否则打包后打开设置页会 404。
+WEBUI_DIR = PROJECT_ROOT / "src" / "webui"
+if WEBUI_DIR.is_dir():
+    datas.append((str(WEBUI_DIR / "settings.html"), "src/webui"))
+    print("[spec] 已收集设置界面 HTML")
+else:
+    print(f"[spec] !! 未找到设置界面目录：{WEBUI_DIR}")
+
 # ---------------------------------------------------------------------------
 # 隐藏导入：动态导入的模块 PyInstaller 分析不到
 # ---------------------------------------------------------------------------
@@ -109,6 +118,14 @@ hiddenimports: list[str] = [
     "sqlite3",
     # --- 本项目 ---
     "src",
+    "src.settings_api",
+    "src.settings_service",
+    "src.progress",
+    "src.webui",
+    # tkinter 用于设置界面的"浏览…"目录选择框。
+    # 缺省会被 PyInstaller 排除，但这里确实需要它。
+    "tkinter",
+    "tkinter.filedialog",
 ]
 
 # ---------------------------------------------------------------------------
@@ -137,8 +154,7 @@ excludes: list[str] = [
     "scipy",
     "pandas",
     "PIL.ImageQt",
-    # 未使用的 GUI 框架
-    "tkinter",
+    # 未使用的 GUI 框架（tkinter 例外：设置界面用它弹目录选择框）
     "PyQt5",
     "PyQt6",
     "PySide2",

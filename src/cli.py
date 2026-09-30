@@ -11,6 +11,7 @@
     python main.py tray                 # 托盘常驻
     python main.py demo                 # 生成演示数据（无需邮箱）
     python main.py model status         # 查看嵌入模型状态
+    python main.py settings             # 可视化设置界面
 """
 
 from __future__ import annotations
@@ -595,6 +596,37 @@ def cmd_serve(args: argparse.Namespace) -> int:
         context.close()
 
 
+def cmd_settings(args: argparse.Namespace) -> int:
+    """打开可视化设置界面（启动本地服务后自动打开浏览器）。"""
+    import threading
+
+    from .cancellation import install_signal_handlers
+    from .kb_api import serve
+    from .tray_app import open_url
+
+    context = _load_context(args)
+    token = install_signal_handlers(context.cancel)
+    host = args.host or context.config.api.host
+    port = args.port or context.config.api.port
+    url = f"http://{host}:{port}/setup"
+
+    if args.no_browser:
+        info(f"设置界面：{url}")
+    else:
+        # 等 uvicorn 起来再打开，避免打开一个连接被拒的页面
+        threading.Timer(1.8, lambda: open_url(url)).start()
+        info(f"即将打开设置界面：{url}")
+
+    try:
+        serve(context, host=host, port=port)
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        token.cancel("设置界面退出")
+        context.close()
+
+
 def cmd_tray(args: argparse.Namespace) -> int:
     from .cancellation import install_signal_handlers
 
@@ -886,6 +918,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", help="监听地址（默认取配置）")
     p_serve.add_argument("--port", type=int, help="监听端口（默认 8990）")
     p_serve.set_defaults(func=cmd_serve)
+
+    p_settings = sub.add_parser("settings", help="打开可视化设置界面")
+    p_settings.add_argument("--host", help="监听地址（默认取配置）")
+    p_settings.add_argument("--port", type=int, help="监听端口（默认 8990）")
+    p_settings.add_argument("--no-browser", action="store_true", help="只启动服务，不自动打开浏览器")
+    p_settings.set_defaults(func=cmd_settings)
 
     p_tray = sub.add_parser("tray", help="托盘常驻 + 定时同步")
     p_tray.add_argument("--no-api", action="store_true", help="不启动 API 子进程")

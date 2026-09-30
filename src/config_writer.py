@@ -59,6 +59,7 @@ sync:
   folders: []                          # 留空 = 同步全部文件夹
   exclude_folders: ["垃圾邮件", "Junk"] # 排除的文件夹
   fetch_batch_size: 50                 # 每批拉取封数
+  fetch_workers: 3                     # 并发下载连接数（1=顺序；建议 3-5，过多会被限流）
   full_scan_interval_hours: 24         # 全量 UID 比对周期
   reconcile_deletions: true            # 处理网页端删除/移动的邮件
   dedupe_by_message_id: true           # 跨文件夹按 Message-ID 去重

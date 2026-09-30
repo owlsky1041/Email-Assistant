@@ -151,6 +151,14 @@ class TrayApplication:
             return self._run_headless()
 
         logger.info("托盘已启动，右键图标查看菜单")
+
+        # 首次运行引导：还没配邮箱或授权码时自动打开设置界面，
+        # 否则用户面对一个"什么都不做"的托盘图标会无从下手。
+        if self.needs_setup():
+            logger.info("检测到尚未完成配置，自动打开设置界面")
+            self._notify("请先完成邮箱配置")
+            threading.Timer(3.0, self._action_open_settings).start()
+
         return self._run_tray()
 
     def _run_headless(self) -> int:
@@ -167,6 +175,7 @@ class TrayApplication:
         assert pystray is not None
         menu = pystray.Menu(
             pystray.MenuItem("立即同步", self._action_sync, default=True),
+            pystray.MenuItem("设置…", self._action_open_settings),
             pystray.MenuItem("打开最新邮件", self._action_open_latest),
             pystray.MenuItem("打开归档目录", self._action_open_archive),
             pystray.Menu.SEPARATOR,
@@ -336,6 +345,30 @@ class TrayApplication:
         threading.Thread(
             target=self.scheduler._run_sync, name="tray-sync", daemon=True
         ).start()
+
+    def settings_url(self) -> str:
+        return f"http://{self.config.api.host}:{self.config.api.port}/setup"
+
+    def _action_open_settings(self, *_args: Any) -> None:
+        """打开设置界面；API 子进程没起来就临时拉一个。"""
+        if self._api_process is None:
+            self.start_api_process()
+            # 给 uvicorn 一点启动时间，否则浏览器会看到"拒绝连接"
+            threading.Timer(2.0, lambda: open_url(self.settings_url())).start()
+            self._notify("正在启动设置界面…")
+            return
+        open_url(self.settings_url())
+
+    def needs_setup(self) -> bool:
+        """是否需要引导用户完成首次配置。"""
+        from .config import resolve_auth_code
+
+        if not self.config.email.address:
+            return True
+        try:
+            return not resolve_auth_code(self.config)
+        except Exception:  # noqa: BLE001
+            return True
 
     def _action_open_latest(self, *_args: Any) -> None:
         path = self._latest_path or self._latest_message_path()

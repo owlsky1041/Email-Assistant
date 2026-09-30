@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>邮件管理助手 · 设置</title>
+<style>
+  :root{
+    --bg:#f4f6fb; --card:#fff; --line:#e3e8f0; --text:#1f2733; --muted:#6b7684;
+    --primary:#2f6fd0; --primary-d:#255ab0; --ok:#1a8f4c; --warn:#c07a00; --err:#c0392b;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.6 "Microsoft YaHei","PingFang SC","Hiragino Sans GB",system-ui,sans-serif}
+  header{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid var(--line);
+         padding:14px 24px;display:flex;align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .sp{flex:1}
+  main{max-width:900px;margin:20px auto 80px;padding:0 20px;display:flex;flex-direction:column;gap:16px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  section>h2{margin:0;padding:14px 18px;font-size:14px;font-weight:600;
+             border-bottom:1px solid var(--line);background:#fafbfe;display:flex;align-items:center;gap:8px}
+  section>h2 .hint{font-weight:400;color:var(--muted);font-size:12px}
+  .body{padding:16px 18px;display:flex;flex-direction:column;gap:12px}
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .field{display:flex;flex-direction:column;gap:4px;flex:1;min-width:220px}
+  .field label{font-size:12px;color:var(--muted)}
+  input[type=text],input[type=password],input[type=number],select{
+    padding:8px 10px;border:1px solid var(--line);border-radius:6px;font:inherit;background:#fff;width:100%}
+  input:focus,select:focus{outline:2px solid #cfe0f8;border-color:var(--primary)}
+  input:disabled{background:#f6f7fa;color:var(--muted)}
+  .check{display:flex;align-items:center;gap:8px}
+  .check input{width:auto}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:4px}
+  button{padding:8px 16px;border-radius:6px;border:1px solid var(--line);background:#fff;
+         font:inherit;cursor:pointer;color:var(--text)}
+  button:hover{background:#f7f9fc}
+  button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  button.primary:hover{background:var(--primary-d)}
+  button.danger{color:var(--err);border-color:#f0c9c4}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .msg{font-size:12px;padding:8px 10px;border-radius:6px;display:none;white-space:pre-wrap}
+  .msg.show{display:block}
+  .msg.ok{background:#eaf7ef;color:var(--ok)}
+  .msg.err{background:#fdeceb;color:var(--err)}
+  .msg.warn{background:#fdf6e6;color:var(--warn)}
+  .kv{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:2px}
+  .kv code{background:#f2f4f8;padding:1px 6px;border-radius:4px;color:#3b4657;word-break:break-all}
+  .folders{max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:8px;
+           display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px}
+  .folders label{display:flex;gap:6px;align-items:center;font-size:13px;cursor:pointer}
+  .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;
+         background:#eef3fb;color:var(--primary)}
+  .badge.ok{background:#eaf7ef;color:var(--ok)}
+  .badge.err{background:#fdeceb;color:var(--err)}
+  #toast{position:fixed;right:20px;bottom:20px;padding:12px 18px;border-radius:8px;
+         background:#243044;color:#fff;opacity:0;transition:opacity .25s;pointer-events:none;z-index:50;
+         max-width:420px;white-space:pre-wrap}
+  #toast.show{opacity:1}
+  #toast.err{background:#8f2620}
+  .sep{height:1px;background:var(--line);margin:2px 0}
+  .bar{height:8px;background:#eef1f6;border-radius:5px;overflow:hidden}
+  .bar-fill{height:100%;width:0;background:linear-gradient(90deg,#2f6fd0,#4a93ea);
+            transition:width .3s}
+  .bar-fill.done{background:linear-gradient(90deg,#1a8f4c,#35b06a)}
+  .bar-fill.err{background:linear-gradient(90deg,#c0392b,#e06055)}
+  .progress-head{display:flex;gap:10px;align-items:center}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+  .stat{background:#f7f9fc;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  .stat b{display:block;font-size:18px;font-weight:600;line-height:1.3}
+  .stat span{font-size:11px;color:var(--muted)}
+  .log{height:210px;overflow:auto;background:#1e2634;color:#cfd8e6;border-radius:8px;
+       padding:10px 12px;font:12px/1.7 Consolas,Menlo,monospace;white-space:pre-wrap}
+  .log .l-error{color:#ff9b8f}
+  .log .l-warn{color:#ffd479}
+  .log .l-ok{color:#8fe0a8}
+  .log .l-item{color:#9fb3cd}
+  .log .t{color:#68788f}
+  details summary{cursor:pointer;color:var(--muted);font-size:12px;user-select:none}
+  details[open] summary{margin-bottom:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>邮件管理助手 · 设置</h1>
+  <span class="sp"></span>
+  <span id="conn" class="badge">未连接</span>
+</header>
+
+<main>
+  <!-- 同步进度 -->
+  <section>
+    <h2>同步进度 <span class="hint">实时显示下载与索引状态</span></h2>
+    <div class="body">
+      <div class="bar"><div class="bar-fill" id="bar"></div></div>
+      <div class="progress-head">
+        <span id="phase" class="badge">空闲</span>
+        <span id="progress-text" class="kv" style="flex:1"></span>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="actions">
+        <button class="primary" id="btn_sync_start">立即同步</button>
+        <button id="btn_sync_full">全量重新扫描</button>
+        <label class="check" style="margin-left:auto">
+          <input type="checkbox" id="auto_scroll" checked><span class="kv">自动滚动</span>
+        </label>
+        <button id="btn_clear_log">清空日志</button>
+      </div>
+      <div class="log" id="log"></div>
+      <div class="msg" id="msg_sync_run"></div>
+    </div>
+  </section>
+
+  <!-- 邮箱账户 -->
+  <section>
+    <h2>邮箱账户 <span class="hint">腾讯企业邮箱 IMAP</span></h2>
+    <div class="body">
+      <div class="row">
+        <div class="field">
+          <label>邮箱地址</label>
+          <input type="text" id="email_address" placeholder="you@yourcorp.com" autocomplete="off">
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>IMAP 服务器</label>
+          <input type="text" id="imap_server" placeholder="imap.exmail.qq.com">
+        </div>
+        <div class="field" style="max-width:140px">
+          <label>端口</label>
+          <input type="number" id="imap_port" min="1" max="65535">
+        </div>
+        <div class="field" style="max-width:120px;justify-content:flex-end">
+          <div class="check"><input type="checkbox" id="use_ssl"><label for="use_ssl">使用 SSL</label></div>
+        </div>
+      </div>
+
+      <div class="sep"></div>
+
+      <div class="row">
+        <div class="field">
+          <label>授权码（客户端专用密码）</label>
+          <input type="password" id="auth_code" placeholder="留空表示不修改" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="kv" id="auth_status"></div>
+      <div class="actions">
+        <button class="primary" id="btn_save_auth">保存授权码</button>
+        <button class="danger" id="btn_clear_auth">清除授权码</button>
+        <span class="hint" style="color:var(--muted);font-size:12px">
+          在 腾讯企业邮箱 → 设置 → 客户端设置 中生成
+        </span>
+      </div>
+
+      <div class="sep"></div>
+      <div class="actions">
+        <button id="btn_test">测试连接</button>
+        <button class="primary" id="btn_save_email">保存账户设置</button>
+      </div>
+      <div class="msg" id="msg_email"></div>
+    </div>
+  </section>
+
+  <!-- 数据存放 -->
+  <section>
+    <h2>数据存放位置 <span class="hint">邮件归档 / 数据库 / 索引</span></h2>
+    <div class="body">
+      <div class="row">
+        <div class="field">
+          <label>数据根目录</label>
+          <input type="text" id="data_root" placeholder="例如 D:\MailAssistant">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="btn_browse">浏览…</button>
+        <button id="btn_open">打开目录</button>
+        <button class="primary" id="btn_save_root">保存位置</button>
+        <button id="btn_migrate">迁移现有数据</button>
+      </div>
+      <div class="kv" id="paths"></div>
+      <div class="msg" id="msg_root"></div>
+      <details>
+        <summary>高级：分别指定各路径</summary>
+        <div class="row"><div class="field"><label>Markdown 归档</label><input type="text" id="archive_dir"></div></div>
+        <div class="row"><div class="field"><label>附件目录</label><input type="text" id="attachment_dir"></div></div>
+        <div class="row"><div class="field"><label>SQLite 数据库</label><input type="text" id="sqlite_path"></div></div>
+        <div class="row"><div class="field"><label>向量库目录</label><input type="text" id="chroma_dir"></div></div>
+        <div class="row"><div class="field"><label>备份目录</label><input type="text" id="backup_dir"></div></div>
+        <div class="actions"><button id="btn_save_paths">保存以上路径</button></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- 同步 -->
+  <section>
+    <h2>同步设置</h2>
+    <div class="body">
+      <div class="row">
+        <div class="field" style="max-width:200px">
+          <label>自动同步间隔（分钟）</label>
+          <input type="number" id="interval_minutes" min="1" max="1440">
+        </div>
+        <div class="field" style="max-width:220px">
+          <label>附件大小上限（MB）</label>
+          <input type="number" id="max_attachment_size_mb" min="1" max="2048">
+        </div>
+        <div class="field" style="max-width:220px">
+          <label>单次同步上限（0=不限）</label>
+          <input type="number" id="max_messages_per_run" min="0">
+        </div>
+        <div class="field" style="max-width:200px">
+          <label>并发下载连接数</label>
+          <input type="number" id="fetch_workers" min="1" max="16">
+        </div>
+      </div>
+      <div class="check"><input type="checkbox" id="download_attachments"><label for="download_attachments">下载附件</label></div>
+      <div class="check"><input type="checkbox" id="reconcile_deletions"><label for="reconcile_deletions">每天与服务端比对，处理已删除邮件</label></div>
+
+      <div class="sep"></div>
+      <div class="row">
+        <div class="field">
+          <label>同步的文件夹（全不选 = 全部文件夹）</label>
+          <div class="folders" id="folders"><span class="kv">点击「加载文件夹」获取列表</span></div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>排除的文件夹（逗号分隔）</label>
+          <input type="text" id="exclude_folders" placeholder="垃圾邮件, Junk">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="btn_load_folders">加载文件夹</button>
+        <button id="btn_select_all">全选</button>
+        <button id="btn_select_none">全不选</button>
+        <button class="primary" id="btn_save_sync">保存同步设置</button>
+      </div>
+      <div class="msg" id="msg_sync"></div>
+    </div>
+  </section>
+
+  <!-- 检索 -->
+  <section>
+    <h2>检索与语义搜索</h2>
+    <div class="body">
+      <div class="row">
+        <div class="field">
+          <label>嵌入后端</label>
+          <select id="embedding_backend">
+            <option value="auto">自动（优先 ONNX）</option>
+            <option value="onnx">ONNX（推荐，无需 PyTorch）</option>
+            <option value="sentence-transformers">SentenceTransformer</option>
+            <option value="hashing">哈希兜底（仅词法，开发用）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>向量库后端</label>
+          <select id="vector_backend">
+            <option value="auto">自动（优先 ChromaDB）</option>
+            <option value="chroma">ChromaDB</option>
+            <option value="sqlite-vec">sqlite-vec</option>
+            <option value="sqlite-bruteforce">SQLite 全量检索</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>ONNX 模型目录</label>
+          <input type="text" id="model_dir">
+        </div>
+      </div>
+      <div class="kv" id="model_status"></div>
+      <div class="actions">
+        <button class="primary" id="btn_save_search">保存检索设置</button>
+        <span class="hint" style="color:var(--muted);font-size:12px">
+          含真实语义检索需要 ONNX 模型；缺失时会自动退化为词法检索
+        </span>
+      </div>
+      <div class="msg" id="msg_search"></div>
+    </div>
+  </section>
+
+  <!-- 本地服务 -->
+  <section>
+    <h2>本地知识库服务 <span class="hint">供智能体 / RAG 调用</span></h2>
+    <div class="body">
+      <div class="row">
+        <div class="field" style="max-width:220px">
+          <label>监听地址</label>
+          <input type="text" id="api_host" placeholder="127.0.0.1">
+        </div>
+        <div class="field" style="max-width:160px">
+          <label>端口</label>
+          <input type="number" id="api_port" min="1" max="65535">
+        </div>
+        <div class="field">
+          <label>访问令牌（留空 = 不鉴权，仅本机可访问）</label>
+          <input type="password" id="api_token" placeholder="留空表示不修改" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="kv" id="api_status"></div>
+      <div class="actions">
+        <button class="primary" id="btn_save_api">保存服务设置</button>
+        <button id="btn_open_docs">打开接口文档</button>
+      </div>
+      <div class="msg" id="msg_api"></div>
+    </div>
+  </section>
+
+  <!-- 通知 -->
+  <section>
+    <h2>通知</h2>
+    <div class="body">
+      <div class="check"><input type="checkbox" id="notify_on_new_mail"><label for="notify_on_new_mail">收到新邮件时弹气泡通知</label></div>
+      <div class="row">
+        <div class="field" style="max-width:240px">
+          <label>点击通知后</label>
+          <select id="click_action">
+            <option value="markdown">打开本地邮件</option>
+            <option value="webmail">打开企业邮箱网页版</option>
+            <option value="both">两者都打开</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>企业邮箱网页版地址</label>
+          <input type="text" id="webmail_url">
+        </div>
+      </div>
+      <div class="actions"><button class="primary" id="btn_save_tray">保存通知设置</button></div>
+      <div class="msg" id="msg_tray"></div>
+    </div>
+  </section>
+
+  <div class="kv" id="runtime"></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const TOKEN = "__SETUP_TOKEN__";
+
+function toast(text, isErr) {
+  const el = document.getElementById('toast');
+  el.textContent = text;
+  el.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = ''; }, isErr ? 6000 : 2600);
+}
+
+async function api(path, method = 'GET', body) {
+  const opt = { method, headers: { 'X-Setup-Token': TOKEN } };
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opt);
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok) {
+    const detail = (data && (data.detail || data.error)) || ('HTTP ' + res.status);
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+function show(id, text, kind) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'msg show ' + (kind || 'ok');
+}
+
+const $ = (id) => document.getElementById(id);
+const val = (id) => $(id).value.trim();
+const num = (id) => { const v = parseInt($(id).value, 10); return Number.isFinite(v) ? v : null; };
+
+let current = null;
+
+function render(s) {
+  current = s;
+  $('email_address').value = s.email.address || '';
+  $('imap_server').value = s.email.imap_server || '';
+  $('imap_port').value = s.email.imap_port;
+  $('use_ssl').checked = !!s.email.use_ssl;
+
+  const a = s.auth;
+  $('auth_status').innerHTML = a.configured
+    ? `授权码：<span class="badge ok">已配置</span> 来源 <code>${a.backend}</code> 长度 ${a.length}`
+    : `授权码：<span class="badge err">未配置</span> 保存到密钥库，或设置环境变量 <code>${a.env_var}</code>`;
+
+  $('data_root').value = s.storage.data_root || '';
+  $('archive_dir').value = s.storage.archive_dir || '';
+  $('attachment_dir').value = s.storage.attachment_dir || '';
+  $('sqlite_path').value = s.storage.sqlite_path || '';
+  $('chroma_dir').value = s.storage.chroma_dir || '';
+  $('backup_dir').value = s.storage.backup_dir || '';
+  $('paths').innerHTML =
+    `实际使用：归档 <code>${s.storage.resolved.archive}</code><br>` +
+    `数据库 <code>${s.storage.resolved.sqlite}</code><br>` +
+    `已用空间：数据库 ${s.storage.database_size_mb} MB · 归档 ${s.storage.archive_size_mb} MB`;
+
+  $('interval_minutes').value = s.sync.interval_minutes;
+  $('max_attachment_size_mb').value = s.sync.max_attachment_size_mb;
+  $('max_messages_per_run').value = s.sync.max_messages_per_run;
+  $('fetch_workers').value = s.sync.fetch_workers;
+  $('download_attachments').checked = !!s.sync.download_attachments;
+  $('reconcile_deletions').checked = !!s.sync.reconcile_deletions;
+  $('exclude_folders').value = (s.sync.exclude_folders || []).join(', ');
+  renderFolders(s.sync.folders || []);
+
+  $('embedding_backend').value = s.embedding.backend;
+  $('vector_backend').value = s.vector.backend;
+  $('model_dir').value = s.embedding.model_dir || '';
+  $('model_status').innerHTML = s.embedding.model_ready
+    ? `ONNX 模型：<span class="badge ok">已就绪</span>`
+    : `ONNX 模型：<span class="badge err">未安装</span> —— 当前只能做关键词检索。` +
+      `可从发行包附件下载后放到模型目录，执行 <code>model import</code>。`;
+
+  $('api_host').value = s.api.host || '';
+  $('api_port').value = s.api.port;
+  $('api_status').innerHTML = s.api.has_token
+    ? `访问令牌：<span class="badge ok">已设置</span>`
+    : `访问令牌：<span class="badge">未设置</span>（仅本机可访问）`;
+
+  $('notify_on_new_mail').checked = !!s.tray.notify_on_new_mail;
+  $('click_action').value = s.tray.click_action;
+  $('webmail_url').value = s.tray.webmail_url || '';
+
+  $('runtime').innerHTML =
+    `配置文件 <code>${s.runtime.config_path || '（未使用配置文件）'}</code>` +
+    (s.runtime.data_root_env ? `<br>数据根目录由环境变量 <code>EMAIL_ASSISTANT_HOME</code> 指定：<code>${s.runtime.data_root_env}</code>` : '') +
+    (s.runtime.frozen ? `<br>运行方式：打包应用` : '');
+}
+
+let knownFolders = [];
+function renderFolders(selected) {
+  const box = $('folders');
+  if (!knownFolders.length) {
+    box.innerHTML = '<span class="kv">点击「加载文件夹」获取列表；全不选表示同步全部文件夹</span>';
+    return;
+  }
+  const sel = new Set(selected || []);
+  box.innerHTML = '';
+  knownFolders.forEach(name => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = name; cb.checked = sel.has(name) || sel.size === 0;
+    cb.dataset.folder = name;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(name));
+    box.appendChild(label);
+  });
+}
+
+function selectedFolders() {
+  return Array.from(document.querySelectorAll('#folders input[type=checkbox]'))
+    .filter(cb => cb.checked).map(cb => cb.dataset.folder);
+}
+
+async function reload() {
+  try {
+    render(await api('/api/settings'));
+    $('conn').textContent = '已连接';
+    $('conn').className = 'badge ok';
+  } catch (e) {
+    $('conn').textContent = '未连接';
+    $('conn').className = 'badge err';
+    toast('读取设置失败：' + e.message, true);
+  }
+}
+
+// ---- 事件绑定 --------------------------------------------------------
+
+$('btn_save_email').onclick = async () => {
+  try {
+    await api('/api/settings', 'PUT', { email: {
+      address: val('email_address'), imap_server: val('imap_server'),
+      imap_port: num('imap_port'), use_ssl: $('use_ssl').checked,
+    }});
+    show('msg_email', '账户设置已保存', 'ok'); toast('账户设置已保存');
+  } catch (e) { show('msg_email', e.message, 'err'); }
+};
+
+$('btn_save_auth').onclick = async () => {
+  const code = $('auth_code').value.trim();
+  if (!code) { show('msg_email', '请输入授权码', 'warn'); return; }
+  try {
+    await api('/api/settings/auth-code', 'PUT', { code });
+    $('auth_code').value = '';
+    show('msg_email', '授权码已保存到密钥库（不会写入配置文件，也不会被回显）', 'ok');
+    toast('授权码已保存');
+    await reload();
+  } catch (e) { show('msg_email', e.message, 'err'); }
+};
+
+$('btn_clear_auth').onclick = async () => {
+  if (!confirm('确定清除已保存的授权码？清除后将无法同步邮件。')) return;
+  try {
+    await api('/api/settings/auth-code', 'DELETE');
+    show('msg_email', '授权码已清除', 'warn'); await reload();
+  } catch (e) { show('msg_email', e.message, 'err'); }
+};
+
+$('btn_test').onclick = async () => {
+  const btn = $('btn_test');
+  btn.disabled = true; btn.textContent = '测试中…';
+  show('msg_email', '正在连接邮箱，请稍候…', 'warn');
+  try {
+    const unsaved = $('auth_code').value.trim();
+    const r = await api('/api/settings/test-connection', 'POST',
+                        unsaved ? { auth_code: unsaved } : {});
+    if (r.ok) {
+      show('msg_email',
+        `连接成功\n服务器：${r.server}\n文件夹：${r.folder_count} 个（可选 ${r.selectable} 个）\n收件箱邮件：${r.inbox_messages} 封`,
+        'ok');
+      knownFolders = r.folders || [];
+      renderFolders((current && current.sync.folders) || []);
+    } else {
+      show('msg_email', '连接失败：' + r.error, 'err');
+    }
+  } catch (e) { show('msg_email', e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '测试连接'; }
+};
+
+$('btn_save_root').onclick = async () => {
+  const root = val('data_root');
+  if (!root) { show('msg_root', '请填写数据根目录', 'warn'); return; }
+  try {
+    await api('/api/settings', 'PUT', { data_root: root });
+    show('msg_root', '数据位置已保存。重启程序后完全生效；已有数据请用「迁移现有数据」。', 'ok');
+    toast('数据位置已保存'); await reload();
+  } catch (e) { show('msg_root', e.message, 'err'); }
+};
+
+$('btn_save_paths').onclick = async () => {
+  try {
+    await api('/api/settings', 'PUT', { storage: {
+      archive_dir: val('archive_dir'), attachment_dir: val('attachment_dir'),
+      sqlite_path: val('sqlite_path'), chroma_dir: val('chroma_dir'),
+      backup_dir: val('backup_dir'),
+    }});
+    show('msg_root', '路径已保存', 'ok'); await reload();
+  } catch (e) { show('msg_root', e.message, 'err'); }
+};
+
+$('btn_browse').onclick = async () => {
+  try {
+    const r = await api('/api/settings/pick-directory', 'POST', { initial: val('data_root') });
+    if (r.ok) { $('data_root').value = r.path; }
+    else if (!r.cancelled) { show('msg_root', r.error, 'warn'); }
+  } catch (e) { show('msg_root', e.message, 'err'); }
+};
+
+$('btn_open').onclick = async () => {
+  try {
+    const r = await api('/api/settings/open-path', 'POST', { path: val('data_root') });
+    if (!r.ok) show('msg_root', r.error || '打开失败', 'warn');
+  } catch (e) { show('msg_root', e.message, 'err'); }
+};
+
+$('btn_migrate').onclick = async () => {
+  const root = val('data_root');
+  if (!root) { show('msg_root', '请先填写目标目录', 'warn'); return; }
+  if (!confirm(`将把现有数据迁移到：\n${root}\n\n迁移过程中请勿关闭程序。继续？`)) return;
+  show('msg_root', '正在迁移，请稍候…', 'warn');
+  try {
+    const r = await api('/api/settings/migrate', 'POST', { new_root: root });
+    show('msg_root', `迁移完成\n目标：${r.target}\n已迁移：${(r.moved || []).join('、') || '无'}` +
+      (r.skipped && r.skipped.length ? `\n已跳过（目标已存在）：${r.skipped.join('、')}` : ''), 'ok');
+    toast('数据迁移完成'); await reload();
+  } catch (e) { show('msg_root', e.message, 'err'); }
+};
+
+$('btn_save_sync').onclick = async () => {
+  try {
+    await api('/api/settings', 'PUT', { sync: {
+      interval_minutes: num('interval_minutes'),
+      max_attachment_size_mb: num('max_attachment_size_mb'),
+      max_messages_per_run: num('max_messages_per_run'),
+      fetch_workers: num('fetch_workers'),
+      download_attachments: $('download_attachments').checked,
+      reconcile_deletions: $('reconcile_deletions').checked,
+      folders: selectedFolders(),
+      exclude_folders: val('exclude_folders').split(',').map(s => s.trim()).filter(Boolean),
+    }});
+    show('msg_sync', '同步设置已保存（间隔改动需重启托盘生效）', 'ok'); toast('同步设置已保存');
+  } catch (e) { show('msg_sync', e.message, 'err'); }
+};
+
+$('btn_load_folders').onclick = async () => {
+  const btn = $('btn_load_folders');
+  btn.disabled = true; btn.textContent = '加载中…';
+  try {
+    const r = await api('/api/settings/folders');
+    knownFolders = r.folders || [];
+    renderFolders((current && current.sync.folders) || []);
+    show('msg_sync', `已加载 ${knownFolders.length} 个文件夹`, 'ok');
+  } catch (e) { show('msg_sync', e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '加载文件夹'; }
+};
+$('btn_select_all').onclick = () => document.querySelectorAll('#folders input').forEach(cb => cb.checked = true);
+$('btn_select_none').onclick = () => document.querySelectorAll('#folders input').forEach(cb => cb.checked = false);
+
+$('btn_save_search').onclick = async () => {
+  try {
+    await api('/api/settings', 'PUT', {
+      embedding: { backend: $('embedding_backend').value, model_dir: val('model_dir') },
+      vector: { backend: $('vector_backend').value },
+    });
+    show('msg_search', '检索设置已保存。更换嵌入模型后需要重建索引（python main.py index --rebuild）。', 'ok');
+    toast('检索设置已保存'); await reload();
+  } catch (e) { show('msg_search', e.message, 'err'); }
+};
+
+$('btn_save_api').onclick = async () => {
+  const patch = { api: { host: val('api_host'), port: num('api_port') } };
+  const t = $('api_token').value.trim();
+  if (t) patch.api.token = t;
+  try {
+    await api('/api/settings', 'PUT', patch);
+    $('api_token').value = '';
+    show('msg_api', '服务设置已保存（改端口需重启）', 'ok'); await reload();
+  } catch (e) { show('msg_api', e.message, 'err'); }
+};
+
+$('btn_open_docs').onclick = () => {
+  const s = current;
+  const host = (s && s.api.host) || '127.0.0.1';
+  const port = (s && s.api.port) || 8990;
+  window.open(`http://${host}:${port}/docs`, '_blank');
+};
+
+$('btn_save_tray').onclick = async () => {
+  try {
+    await api('/api/settings', 'PUT', { tray: {
+      notify_on_new_mail: $('notify_on_new_mail').checked,
+      click_action: $('click_action').value,
+      webmail_url: val('webmail_url'),
+    }});
+    show('msg_tray', '通知设置已保存', 'ok'); toast('通知设置已保存');
+  } catch (e) { show('msg_tray', e.message, 'err'); }
+};
+
+// ---- 同步进度 --------------------------------------------------------
+
+let progressTimer = null;
+let lastLogKey = '';
+
+function fmtDuration(sec) {
+  if (sec === null || sec === undefined) return '—';
+  sec = Math.round(sec);
+  if (sec < 60) return sec + ' 秒';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return `${m} 分 ${s} 秒`;
+  return `${Math.floor(m / 60)} 时 ${m % 60} 分`;
+}
+
+const PHASE_LABEL = {
+  idle: '空闲', connecting: '连接中', scanning: '扫描中',
+  fetching: '下载中', indexing: '建索引', done: '已完成', error: '出错',
+};
+
+function renderProgress(p) {
+  const phase = $('phase');
+  phase.textContent = PHASE_LABEL[p.phase] || p.phase;
+  phase.className = 'badge' + (p.phase === 'done' ? ' ok'
+                              : p.phase === 'error' ? ' err' : '');
+
+  const bar = $('bar');
+  bar.style.width = (p.running || p.phase === 'done' ? p.percent : 0) + '%';
+  bar.className = 'bar-fill' + (p.phase === 'done' ? ' done' : p.phase === 'error' ? ' err' : '');
+
+  let text;
+  if (p.running) {
+    const who = p.current_folder ? `文件夹 ${p.current_folder}` : '准备中';
+    const cnt = p.folder_messages_total
+      ? `${p.folder_messages_done}/${p.folder_messages_total} 封` : '';
+    const speed = p.rate_per_second ? `${p.rate_per_second} 封/秒` : '';
+    const eta = p.eta_seconds !== null && p.eta_seconds !== undefined
+      ? `剩余约 ${fmtDuration(p.eta_seconds)}` : '';
+    text = [who, cnt, speed, eta, `并发 ${p.workers}`].filter(Boolean).join(' · ');
+  } else if (p.finished_at) {
+    text = `上次完成于 ${p.finished_at.replace('T', ' ').slice(0, 19)}，用时 ${fmtDuration(p.elapsed_seconds)}`;
+  } else {
+    text = '尚未同步过。点击「立即同步」开始。';
+  }
+  $('progress-text').textContent = text;
+
+  const items = [
+    ['邮件总数', p.total_messages], ['本次归档', p.archived],
+    ['跳过', p.skipped], ['失败', p.failed],
+    ['已删除', p.deleted], ['待索引', p.pending_index],
+  ];
+  $('stats').innerHTML = items.map(([k, v]) =>
+    `<div class="stat"><b>${v === undefined || v === null ? '—' : v}</b><span>${k}</span></div>`
+  ).join('');
+
+  const log = $('log');
+  const key = (p.events || []).map(e => e.at + e.message).join('|');
+  if (key !== lastLogKey) {
+    lastLogKey = key;
+    log.innerHTML = (p.events || []).map(e =>
+      `<div class="l-${e.level}"><span class="t">${(e.at || '').slice(11, 19)}</span> ${escapeHtml(e.message)}</div>`
+    ).join('');
+    if ($('auto_scroll').checked) log.scrollTop = log.scrollHeight;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function pollProgress() {
+  try {
+    renderProgress(await api('/api/sync/progress'));
+  } catch (e) { /* 轮询失败静默重试，避免刷屏 */ }
+}
+
+function startPolling() {
+  if (progressTimer) return;
+  pollProgress();
+  progressTimer = setInterval(pollProgress, 1200);
+}
+
+$('btn_sync_start').onclick = async () => {
+  try {
+    const r = await api('/api/sync/start', 'POST', {});
+    show('msg_sync_run', r.accepted ? '同步已开始' : r.detail, r.accepted ? 'ok' : 'warn');
+    toast(r.accepted ? '同步已开始' : r.detail, !r.accepted);
+    startPolling();
+  } catch (e) { show('msg_sync_run', e.message, 'err'); }
+};
+
+$('btn_sync_full').onclick = async () => {
+  if (!confirm('全量重新扫描会忽略同步水位，重新检查所有文件夹的邮件。\n已归档的邮件不会重复下载。继续？')) return;
+  try {
+    const r = await api('/api/sync/start', 'POST', { full: true });
+    show('msg_sync_run', r.accepted ? '全量扫描已开始' : r.detail, r.accepted ? 'ok' : 'warn');
+    startPolling();
+  } catch (e) { show('msg_sync_run', e.message, 'err'); }
+};
+
+$('btn_clear_log').onclick = () => { lastLogKey = '__cleared__'; $('log').innerHTML = ''; };
+
+reload();
+startPolling();
+</script>
+</body>
+</html>

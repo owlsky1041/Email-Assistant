@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import email
 import logging
+import threading
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
@@ -139,6 +141,8 @@ class SyncService:
             return SyncResult(error_summary="同步已在进行中")
         self._running = True
         overall = SyncResult(folder="*", started_at=utcnow())
+        workers = max(1, int(self.config.sync.fetch_workers or 1))
+        self._emit("run_start", {"workers": workers})
         try:
             with ImapClient(self.config, self._auth_code(), cancel_token=self.cancel) as client:
                 targets = self._resolve_folders(client, folders)
@@ -203,6 +207,7 @@ class SyncService:
             overall.finished_at = utcnow()
             self._last_result = overall
             self._running = False
+            self._emit("run_done", overall.to_dict())
             self.db.optimize()
 
     def sync_folder(
@@ -285,39 +290,75 @@ class SyncService:
             highest_processed = 0
             truncated = False
 
-            for batch in _batched(new_uids, max(1, self.config.sync.fetch_batch_size)):
-                self.cancel.raise_if_cancelled()
-                if limit and processed >= limit:
-                    truncated = True
-                    break
+            workers = max(1, int(self.config.sync.fetch_workers or 1))
+            pool: _ClientPool | None = None
+            if workers > 1:
+                # 每个工作线程需要**独立的 IMAP 连接**（imaplib 非线程安全），
+                # 因此另开一个连接池，而不是把主连接共享出去。
+                pool = _ClientPool(self.config, self._auth_code(), self.cancel)
 
-                sizes = client.fetch_sizes(batch, folder=folder)
-                for uid in batch:
+            try:
+                for batch in _batched(new_uids, max(1, self.config.sync.fetch_batch_size)):
                     self.cancel.raise_if_cancelled()
                     if limit and processed >= limit:
                         truncated = True
                         break
-                    processed += 1
-                    highest_processed = max(highest_processed, _to_int(uid))
-                    self._process_one(
-                        client,
-                        folder=folder,
-                        uidvalidity=uidvalidity,
-                        uid=uid,
-                        size=sizes.get(uid, 0),
-                        result=result,
-                    )
 
-                # 每批结束推进水位，保证中断后可从断点续传（§7 断点续传）
-                if highest_processed:
-                    self.db.update_folder_state(
-                        self.account,
-                        folder,
-                        last_uid=highest_processed,
-                        last_sync_at=utcnow(),
-                    )
-                if truncated:
-                    break
+                    # 预算截断时只取批次的前缀：这样"已处理集合"始终是前缀，
+                    # 水位可以直接取其中最大 UID，不会跳过未下载的邮件。
+                    allowed = batch
+                    if limit:
+                        remaining = limit - processed
+                        if remaining <= 0:
+                            truncated = True
+                            break
+                        if len(batch) > remaining:
+                            allowed = batch[:remaining]
+                            truncated = True
+
+                    sizes = client.fetch_sizes(allowed, folder=folder)
+
+                    if pool is not None and len(allowed) > 1:
+                        self._process_parallel(
+                            pool,
+                            folder=folder,
+                            uidvalidity=uidvalidity,
+                            uids=allowed,
+                            sizes=sizes,
+                            result=result,
+                            workers=min(workers, len(allowed)),
+                        )
+                    else:
+                        for uid in allowed:
+                            self.cancel.raise_if_cancelled()
+                            self._process_one(
+                                client,
+                                folder=folder,
+                                uidvalidity=uidvalidity,
+                                uid=uid,
+                                size=sizes.get(uid, 0),
+                                result=result,
+                            )
+
+                    processed += len(allowed)
+                    if allowed:
+                        highest_processed = max(
+                            highest_processed, max(_to_int(u) for u in allowed)
+                        )
+
+                    # 每批结束推进水位，保证中断后可从断点续传（§7 断点续传）
+                    if highest_processed:
+                        self.db.update_folder_state(
+                            self.account,
+                            folder,
+                            last_uid=highest_processed,
+                            last_sync_at=utcnow(),
+                        )
+                    if truncated:
+                        break
+            finally:
+                if pool is not None:
+                    pool.close_all()
 
             if truncated:
                 result.skipped += max(0, len(new_uids) - processed)
@@ -387,6 +428,59 @@ class SyncService:
     # 单封处理
     # ------------------------------------------------------------------
 
+    def _process_parallel(
+        self,
+        pool: "_ClientPool",
+        *,
+        folder: str,
+        uidvalidity: int,
+        uids: Sequence[str],
+        sizes: dict[str, int],
+        result: SyncResult,
+        workers: int,
+    ) -> None:
+        """并发下载一批邮件。
+
+        每个线程用自己的 IMAP 连接（imaplib 非线程安全）；
+        数据库写入由 ``Database`` 内部的写锁串行化，WAL 模式下安全；
+        文件写入互不重叠，可安全并发。
+        """
+        counter_lock = threading.Lock()
+
+        def work(uid: str) -> None:
+            try:
+                worker_client = pool.get()
+            except Exception as exc:  # noqa: BLE001 - 建连失败不应拖垮整批
+                with counter_lock:
+                    result.failed += 1
+                    summary = f"uid={uid}: 建立连接失败 {type(exc).__name__}: {exc}"
+                    result.error_summary = (
+                        f"{result.error_summary}; {summary}" if result.error_summary else summary
+                    )
+                logger.error("并发下载建立连接失败：%s", exc)
+                return
+            self._process_one(
+                worker_client,
+                folder=folder,
+                uidvalidity=uidvalidity,
+                uid=uid,
+                size=sizes.get(uid, 0),
+                result=result,
+            )
+            with counter_lock:
+                self._emit(
+                    "message_progress",
+                    {"folder": folder, "uid": uid, "archived": result.archived},
+                )
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="imap-fetch") as pool_exec:
+            futures = [pool_exec.submit(work, uid) for uid in uids]
+            for future in as_completed(futures):
+                self.cancel.raise_if_cancelled()
+                exc = future.exception()
+                if exc is not None and not isinstance(exc, CancelledError):
+                    logger.error("并发下载任务异常：%s", exc)
+
     def _process_one(
         self,
         client: ImapClient,
@@ -447,6 +541,7 @@ class SyncService:
             result.error_summary = (
                 f"{result.error_summary}; {summary}" if result.error_summary else summary
             )
+            self._emit("message_failed", {"folder": folder, "uid": uid, "error": summary})
 
     def _parse_full(
         self, client: ImapClient, folder: str, uid: str, uidvalidity: int, size: int
@@ -705,6 +800,45 @@ class SyncService:
 
 
 # ---------------------------------------------------------------------------
+
+class _ClientPool:
+    """按线程分配独立 IMAP 连接。
+
+    ``imaplib`` / ``imap-tools`` 的连接对象**不能跨线程共享**：
+    同一条连接上并发发命令会导致响应错位，表现为"取到别人的邮件"或
+    解析异常。因此并发下载必须做到"每线程一条连接"。
+
+    连接按需创建（只有真正干活的线程才建连），退出时统一关闭。
+    """
+
+    def __init__(self, config: AppConfig, auth_code: str, cancel: CancellationToken) -> None:
+        self._config = config
+        self._auth_code = auth_code
+        self._cancel = cancel
+        self._local = threading.local()
+        self._all: list[ImapClient] = []
+        self._lock = threading.Lock()
+
+    def get(self) -> ImapClient:
+        client = getattr(self._local, "client", None)
+        if client is None:
+            client = ImapClient(self._config, self._auth_code, cancel_token=self._cancel)
+            client.connect()
+            self._local.client = client
+            with self._lock:
+                self._all.append(client)
+            logger.debug("为线程 %s 建立独立 IMAP 连接", threading.current_thread().name)
+        return client
+
+    def close_all(self) -> None:
+        with self._lock:
+            clients, self._all = list(self._all), []
+        for client in clients:
+            try:
+                client.disconnect()
+            except Exception:  # noqa: BLE001
+                logger.debug("关闭并发连接失败", exc_info=True)
+
 
 def _batched(items: Sequence[Any], size: int) -> Iterator[list[Any]]:
     for start in range(0, len(items), size):

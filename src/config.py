@@ -114,6 +114,9 @@ class SyncConfig(BaseModel):
     folders: list[str] = Field(default_factory=list)  # 空 = 全部文件夹
     exclude_folders: list[str] = Field(default_factory=list)
     fetch_batch_size: int = 50  # §11.2 分批拉取
+    # 并发下载连接数。IMAP 连接不是线程安全的，因此每个工作线程会建立
+    # 独立连接；1 = 顺序下载。腾讯企业邮箱对并发连接有限制，建议 3-5。
+    fetch_workers: int = 3
     full_scan_interval_hours: int = 24  # §11.2 定期全量 UID 比对
     reconcile_deletions: bool = True
     # 按 Message-ID 跨文件夹去重：同一封邮件已在别处归档时不再重复下载与嵌入
@@ -135,6 +138,13 @@ class SyncConfig(BaseModel):
     def _check_batch(cls, v: int) -> int:
         if not (1 <= v <= 1000):
             raise ValueError("fetch_batch_size 建议在 1-1000 之间")
+        return v
+
+    @field_validator("fetch_workers")
+    @classmethod
+    def _check_workers(cls, v: int) -> int:
+        if not (1 <= v <= 16):
+            raise ValueError("fetch_workers 必须在 1-16 之间（过多会被服务端限流）")
         return v
 
 

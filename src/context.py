@@ -22,6 +22,7 @@ from .embedder import Embedder, create_embedder
 from .indexer import IndexService
 from .logging_setup import setup_logging
 from .models import utcnow
+from .progress import SyncProgress
 from .search import SearchEngine
 from .sync_service import SyncService
 from .vector_store import VectorStore, create_vector_store
@@ -53,6 +54,8 @@ class AppContext:
         self._indexer: IndexService | None = None
         self._search: SearchEngine | None = None
         self._sync: SyncService | None = None
+        #: 同步进度（供界面实时显示），始终存在，不随 SyncService 惰性创建
+        self.progress = SyncProgress(workers=max(1, int(config.sync.fetch_workers or 1)))
         self._lock = threading.RLock()
         self._closed = False
 
@@ -112,6 +115,7 @@ class AppContext:
                     self.db,
                     index_service_factory=lambda: self.indexer,
                     cancel_token=self.cancel,
+                    on_progress=self.progress.handle,
                 )
             return self._sync
 
