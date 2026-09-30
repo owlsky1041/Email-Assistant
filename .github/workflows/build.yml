@@ -283,9 +283,9 @@ jobs:
           # 6 之前放在 Contents/MacOS —— 两处都试，避免版本差异导致漏注入
           for d in \
             dist/email-assistant \
-            "dist/邮件管理助手.app/Contents/Frameworks" \
-            "dist/邮件管理助手.app/Contents/MacOS" \
-            "dist/邮件管理助手.app/Contents/Resources"; do
+            "dist/EmailAssistant.app/Contents/Frameworks" \
+            "dist/EmailAssistant.app/Contents/MacOS" \
+            "dist/EmailAssistant.app/Contents/Resources"; do
             if [ -d "$d" ]; then
               mkdir -p "$d/data/models"
               cp data/models/* "$d/data/models/" 2>/dev/null || true

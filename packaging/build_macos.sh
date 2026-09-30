@@ -4,7 +4,7 @@
 #   ./packaging/build_macos.sh
 #
 # 产物：
-#   dist/邮件管理助手.app                          应用包（双击即用，托盘常驻）
+#   dist/EmailAssistant.app                        应用包（双击即用，显示名“邮件管理助手”）
 #   dist/email-assistant/                          命令行版本
 #   dist/email-assistant-<版本>-macos-<架构>.tar.gz
 #   dist/email-assistant-<版本>-macos-<架构>.dmg   （若安装了 create-dmg）
@@ -35,6 +35,7 @@ VERSION="$(python3 -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"
 ARCH="$(uname -m)"   # arm64 或 x86_64
 PY="${PYTHON:-python3}"
 APP_NAME="邮件管理助手"
+APP_BUNDLE_NAME="EmailAssistant.app"  # 目录名用 ASCII，显示名见 Info.plist
 
 echo "==> 构建 macOS 发行包 v${VERSION} (${ARCH})"
 
@@ -56,7 +57,7 @@ done
 rm -rf build dist
 "$PY" -m PyInstaller packaging/email-assistant.spec --noconfirm --log-level WARN
 
-APP_BUNDLE="dist/${APP_NAME}.app"
+APP_BUNDLE="dist/${APP_BUNDLE_NAME}"
 if [ ! -d "$APP_BUNDLE" ]; then
   echo "!! 未生成 .app 应用包，请检查 spec 中的 BUNDLE 配置"
   exit 1
@@ -113,7 +114,7 @@ cat > dist/email-assistant/快速上手.txt <<'EOF'
 腾讯企业邮箱邮件管理助手 —— macOS 命令行版
 ==========================================
 
-图形界面版请直接双击 dist/邮件管理助手.app
+图形界面版请直接双击 dist/EmailAssistant.app（访达中显示为“邮件管理助手”）
 
 命令行用法：
   ./email-assistant init

@@ -16,11 +16,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# PowerShell 7.4+ 默认把**原生命令的非零退出码**也视为终止性错误
+# （$PSNativeCommandUseErrorActionPreference 默认 $true）。
+# 本项目里 `doctor` 在首次运行（尚未配置邮箱）时会**正常返回 1**，
+# 于是脚本会在冒烟测试处莫名其妙地中断——实测这就是 Windows 打包失败的原因。
+# 因此显式关闭，改为逐处检查 $LASTEXITCODE。
+if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
 
-$Version = (Select-String -Path "src\__init__.py" -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
-if (-not $Version) { $Version = "0.0.0" }
+$Version = "0.0.0"
+$versionMatch = Select-String -Path "src\__init__.py" -Pattern '__version__ = "([^"]+)"'
+if ($versionMatch -and $versionMatch.Matches.Count -gt 0) {
+    $Version = $versionMatch.Matches[0].Groups[1].Value
+} else {
+    Write-Host "! 未能从 src\__init__.py 解析版本号，回退为 $Version" -ForegroundColor Yellow
+}
 
 $Python = if ($env:PYTHON) { $env:PYTHON } else { "python" }
 
@@ -52,9 +66,45 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "==> 冒烟测试"
-& "dist\email-assistant\email-assistant.exe" --version
-& "dist\email-assistant\email-assistant.exe" doctor | Out-Null
+Write-Host "==> 冒烟测试（隔离环境，验证产物自包含）"
+$SmokeHome = Join-Path $env:TEMP ("ea-smoke-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $SmokeHome | Out-Null
+$Exe = "dist\email-assistant\email-assistant.exe"
+
+# 用独立 HOME 初始化，避免污染构建机上的既有配置
+$env:EMAIL_ASSISTANT_HOME = $SmokeHome
+& $Exe init --non-interactive | Out-Null
+& $Exe --version
+$DoctorJson = Join-Path $SmokeHome "doctor.json"
+# doctor 在未配置邮箱时返回 1，这是预期行为，因此不检查此处退出码
+& $Exe doctor --json > $DoctorJson
+
+# 解析 JSON 检查关键能力（退出码非 0 即中止）
+$Checker = @'
+import json, sys
+checks = json.load(open(sys.argv[1], encoding="utf-8"))["checks"]
+by_name = {c["name"]: c for c in checks}
+required = [
+    "SQLite 可用", "FTS5 全文检索", "数据库完整性",
+    "归档目录可写", "依赖 imap_tools", "依赖 fastapi",
+    "依赖 cryptography", "依赖 bs4", "依赖 markdownify",
+]
+failed = [n for n in required if not by_name.get(n, {}).get("ok")]
+if failed:
+    print("    X 关键检查未通过：" + ", ".join(failed))
+    sys.exit(1)
+print("    OK 关键检查全部通过")
+for n in ("可选依赖 onnxruntime", "可选依赖 chromadb", "可选依赖 pystray"):
+    print("      " + ("OK " if by_name.get(n, {}).get("ok") else "-- ") + n)
+'@
+# PowerShell 没有 bash 的 <<EOF heredoc，改为把脚本文本管道给 `python -`
+$Checker | & $Python - $DoctorJson
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "!! 冒烟测试失败，中止打包" -ForegroundColor Red
+    exit 1
+}
+Remove-Item -Recurse -Force $SmokeHome -ErrorAction SilentlyContinue
+Remove-Item Env:\EMAIL_ASSISTANT_HOME -ErrorAction SilentlyContinue
 
 # ---- 2.5 清理包内运行时残留 -----------------------------------------------
 # 发行包绝不能带构建机的配置 / 数据库 / 日志
@@ -105,8 +155,28 @@ $Readme | Out-File -FilePath "dist\email-assistant\快速上手.txt" -Encoding U
 # ---- 4. 打包 zip（绿色版）-------------------------------------------------
 $Zip = "dist\email-assistant-$Version-windows-x64.zip"
 Write-Host "==> 打包 $Zip"
-# 保留顶层 email-assistant\ 目录，与 Linux/macOS 的 tar 布局一致
-Compress-Archive -Path "dist\email-assistant" -DestinationPath $Zip -Force
+# 保留顶层 email-assistant\ 目录，与 Linux/macOS 的 tar 布局一致。
+# 优先用 Windows 10+ 自带的 bsdtar：Compress-Archive 在 300MB+ /
+# 上万个文件时极慢且可能内存溢出（会撞上 CI 超时）。
+$UseTar = $false
+try {
+    & tar.exe --version > $null 2>&1
+    $UseTar = ($LASTEXITCODE -eq 0)
+} catch { $UseTar = $false }
+
+if ($UseTar) {
+    Remove-Item -Force $Zip -ErrorAction SilentlyContinue
+    Push-Location dist
+    & tar.exe -a -c -f "email-assistant-$Version-windows-x64.zip" "email-assistant"
+    $tarRc = $LASTEXITCODE
+    Pop-Location
+    if ($tarRc -ne 0) {
+        Write-Host "    ! tar 打包失败，回退到 Compress-Archive" -ForegroundColor Yellow
+        Compress-Archive -Path "dist\email-assistant" -DestinationPath $Zip -Force
+    }
+} else {
+    Compress-Archive -Path "dist\email-assistant" -DestinationPath $Zip -Force
+}
 $ZipSize = [math]::Round((Get-Item $Zip).Length / 1MB, 1)
 Write-Host "    -> $Zip ($ZipSize MB)"
 

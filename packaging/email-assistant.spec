@@ -11,7 +11,7 @@
         email-assistant          # 主程序（控制台版，用于 sync / doctor 等 CLI）
         email-assistant-tray     # 托盘版（Windows/macOS 下不弹控制台窗口）
         _internal/               # 依赖与原生库
-    dist/邮件管理助手.app/        # 仅 macOS
+    dist/EmailAssistant.app/      # 仅 macOS（显示名“邮件管理助手”）
 
 设计决策
 --------
@@ -246,7 +246,9 @@ coll = COLLECT(  # noqa: F821
 if sys.platform == "darwin":
     app = BUNDLE(  # noqa: F821
         coll,
-        name="邮件管理助手.app",
+        # 包目录名用 ASCII：macOS 惯例，也避免 PyInstaller 处理非 ASCII
+        # 路径时的不确定性。界面上显示的名字由 CFBundleDisplayName 决定。
+        name="EmailAssistant.app",
         icon=None,  # 有图标时填 str(PROJECT_ROOT / "packaging" / "icon.icns")
         bundle_identifier="com.emailassistant.desktop",
         info_plist={
