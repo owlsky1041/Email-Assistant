@@ -143,6 +143,11 @@ def create_app(context: AppContext) -> FastAPI:
                 "vectors": ctx.db.count_vectors(),
             },
             "sync_running": ctx.sync_running,
+            # 设置界面是否可用。用户打开 /setup 看到 404 时，
+            # 这里能直接给出原因，不必翻日志。
+            "settings_ui": getattr(
+                app.state, "settings_status", {"enabled": False, "reason": "未初始化"}
+            ),
         }
         # 只有真正初始化过才报告嵌入/向量后端，避免健康检查触发模型加载
         if ctx._embedder is not None:
@@ -444,6 +449,12 @@ def serve(context: AppContext, *, host: str | None = None, port: int | None = No
     context.warmup()
 
     app = create_app(context)
+    status = getattr(app.state, "settings_status", None)
+    if status:
+        if status["enabled"]:
+            print(f"设置界面：{status['url']}")
+        else:
+            print(f"设置界面不可用：{status['reason']}")
     uvicorn.run(
         app,
         host=bind_host,

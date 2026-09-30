@@ -229,21 +229,50 @@ def create_settings_router(  # noqa: C901 - 路由集中一处便于审阅
 def register_settings(app: Any, context: AppContext, *, token: str | None = None) -> str | None:
     """把设置路由挂到已有 FastAPI 应用上。
 
-    非回环监听时**跳过注册**并返回 ``None``（而不是让整个服务启动失败）。
+    无论成功与否都会把结论写到 ``app.state.settings_status``，
+    并通过 ``/api/health`` 暴露。
+
+    这一点很重要：设置界面不可用时用户只会看到一个光秃秃的
+    ``{"detail":"Not Found"}``，如果原因只留在日志里，排查成本极高。
+    常见原因有：监听地址不是回环、页面文件没打进包、依赖缺失。
     """
     config: AppConfig = context.config
+    url = f"http://{config.api.host}:{config.api.port}/setup"
+
+    def _report(enabled: bool, reason: str) -> None:
+        status = {"enabled": enabled, "reason": reason, "url": url}
+        app.state.settings_status = status
+        if enabled:
+            logger.info("设置界面已就绪：%s", url)
+        else:
+            logger.warning("设置界面已停用：%s（地址 %s）", reason, url)
+
     if not is_loopback(config.api.host):
-        logger.warning(
-            "API 监听在非回环地址 %s，已停用设置界面（该接口可改写配置与授权码）",
-            config.api.host,
+        _report(
+            False,
+            f"监听地址 {config.api.host} 不是回环地址；"
+            "设置接口可改写配置与授权码，因此不在非回环地址上提供",
         )
         return None
+
     try:
         router = create_settings_router(context, token=token)
     except SettingsError as exc:
-        logger.warning("设置界面不可用：%s", exc)
+        _report(False, str(exc))
         return None
+    except Exception as exc:  # noqa: BLE001 - 任何意外都要暴露，不能静默
+        logger.exception("注册设置界面失败")
+        _report(False, f"{type(exc).__name__}: {exc}")
+        return None
+
+    # 页面文件缺失时提前发现：否则要等用户打开页面才报 500
+    page = WEBUI_DIR / "settings.html"
+    if not page.is_file():
+        _report(False, f"缺少设置页面文件 {page}（打包时未收集 src/webui/settings.html）")
+        return None
+
     app.include_router(router)
+    _report(True, "ok")
     return getattr(router, "setup_token", None)
 
 

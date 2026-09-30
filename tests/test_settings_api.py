@@ -350,3 +350,61 @@ class TestSetupPage:
 
     def test_page_reads_token_from_injection(self) -> None:
         assert 'const TOKEN = "__SETUP_TOKEN__";' in load_setup_html("__SETUP_TOKEN__")
+
+
+class TestSettingsAvailabilityIsVisible:
+    """设置界面不可用时必须能一眼看出原因。
+
+    回归背景：用户打开 /setup 只拿到 {"detail":"Not Found"}，
+    而原因（页面没打进包 / 地址非回环）只留在日志里，排查成本极高。
+    """
+
+    def test_status_recorded_when_enabled(self, context: AppContext) -> None:
+        app = FastAPI()
+        token = register_settings(app, context)
+        status = app.state.settings_status
+        assert token
+        assert status["enabled"] is True
+        assert status["reason"] == "ok"
+        assert status["url"].endswith("/setup")
+
+    def test_status_recorded_when_non_loopback(self, context: AppContext) -> None:
+        context.config.api.host = "0.0.0.0"
+        app = FastAPI()
+        assert register_settings(app, context) is None
+        status = app.state.settings_status
+        assert status["enabled"] is False
+        assert "回环" in status["reason"]
+
+    def test_status_recorded_when_page_missing(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """页面没打进包时也要报出明确原因，而不是等用户打开才 500。"""
+        import src.settings_api as api_module
+
+        monkeypatch.setattr(api_module, "WEBUI_DIR", tmp_path / "nowhere")
+        app = FastAPI()
+        assert register_settings(app, context) is None
+        status = app.state.settings_status
+        assert status["enabled"] is False
+        assert "settings.html" in status["reason"]
+
+    def test_health_endpoint_exposes_status(self, context: AppContext) -> None:
+        from src.kb_api import create_app
+
+        app = create_app(context)
+        with TestClient(app) as c:
+            body = c.get("/api/health").json()
+        assert "settings_ui" in body
+        assert body["settings_ui"]["enabled"] is True
+        assert body["settings_ui"]["url"].endswith("/setup")
+
+    def test_health_reports_disabled_reason(self, context: AppContext) -> None:
+        from src.kb_api import create_app
+
+        context.config.api.host = "0.0.0.0"
+        app = create_app(context)
+        with TestClient(app) as c:
+            body = c.get("/api/health").json()
+        assert body["settings_ui"]["enabled"] is False
+        assert body["settings_ui"]["reason"]

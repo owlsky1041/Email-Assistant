@@ -3,12 +3,15 @@ name: 构建三平台发行包
 # PyInstaller / Nuitka 都**不支持交叉编译**，因此必须在各目标系统上原生构建。
 # 这个工作流用 GitHub 的原生 runner 完成这件事：
 #
-#   test          —— 在 ubuntu / macos / windows 上跑测试，验证跨平台正确性
+#   test          —— 在 ubuntu / windows 上跑测试，验证跨平台正确性
 #   export-model  —— 导出 ONNX 嵌入模型并作为独立发行附件发布
-#   build         —— 三平台并行打包，产出 .tar.gz / .zip / .app / .dmg / setup.exe
+#   build         —— 并行打包，产出 setup.exe / zip / AppImage / tar.gz
 #   release       —— 打 tag 时自动创建 Release 并附上全部产物
 #
-# 想在自己机器上构建：见 packaging/build_{linux,macos,windows}.*
+# 交付目标：Windows 为主，Linux 用于验证打包链路。
+# macOS 暂不在范围内（脚本见 packaging/build_macos.sh，未验证、不进 CI）。
+#
+# 想在自己机器上构建：见 packaging/build_{windows,linux}.sh（.ps1）
 
 on:
   push:
@@ -48,12 +51,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.13"]
         exclude:
-          # macOS/Windows 上只跑一个版本，省 CI 时间
-          - os: macos-latest
-            python-version: "3.11"
+          # Windows 上只跑一个版本，省 CI 时间
           - os: windows-latest
             python-version: "3.11"
     steps:
@@ -70,6 +71,63 @@ jobs:
           pip install -r requirements.txt
           # 装上可选依赖，让 ChromaDB / ONNX 相关测试真正执行而不是被 skip
           pip install -r requirements-optional.txt
+
+      # Linux 默认不带 tkinter，而"浏览…"目录选择框依赖它。
+      # 不装的话这条代码路径永远不会被执行 —— 之前就是这样漏掉了
+      # 托盘标题的 latin-1 编码崩溃。
+      - name: Linux 额外依赖（tkinter，用于目录选择框）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-tk xvfb x11-utils
+
+      # 在虚拟显示下跑一遍 GUI 路径：托盘图标构造、目录选择框。
+      # 无头环境下这两条路径会提前降级，等于从未被测试过。
+      - name: GUI 冒烟（虚拟显示）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+          xvfb-run -a --server-args="-screen 0 1280x800x24" python - <<'PYGUI'
+          import os, sys, threading, time
+          sys.path.insert(0, ".")
+
+          # 1) tkinter 与目录选择框必须可用
+          import tkinter
+          from tkinter import filedialog
+          print("tkinter", tkinter.TkVersion)
+
+          # 2) 托盘图标必须能用当前平台的标题构造出来
+          from src.tray_app import TRAY_AVAILABLE, build_icon_image, tray_title
+          assert TRAY_AVAILABLE, "pystray / Pillow 应当可用"
+          img = build_icon_image(64)
+          assert img is not None and img.size == (64, 64)
+
+          import pystray
+          menu = pystray.Menu(pystray.MenuItem("设置…", lambda *a: None))
+          # 这一步过去会在 X11 上抛 UnicodeEncodeError
+          icon = pystray.Icon("email-assistant", icon=img, title=tray_title(), menu=menu)
+          errors = []
+
+          def _run():
+              try:
+                  icon.run()
+              except Exception as exc:  # noqa: BLE001
+                  errors.append(exc)
+
+          threading.Thread(target=_run, daemon=True).start()
+          time.sleep(3)
+          assert not errors, f"托盘运行异常：{errors}"
+          icon.stop()
+          print("GUI 冒烟通过：tkinter 可用、托盘可构造可运行")
+
+          # 3) 目录选择框能真正创建窗口
+          root = tkinter.Tk(); root.withdraw()
+          root.after(1200, root.destroy)
+          threading.Thread(target=lambda: filedialog.askdirectory(), daemon=True).start()
+          time.sleep(0.8)
+          print("目录选择框已弹出")
+          try: root.destroy()
+          except Exception: pass
+          PYGUI
 
       - name: 运行测试
         shell: bash
@@ -191,18 +249,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 当前只交付 Windows 与 Linux。
+        # macOS 已按需求搁置：构建脚本仍在（packaging/build_macos.sh），
+        # 但不再进入 CI，也未做过真机验证，因此不作分发承诺。
         include:
-          - os: ubuntu-latest
-            artifact: linux-x86_64
-          - os: macos-latest
-            artifact: macos-arm64
-          # Intel Mac。GitHub 已于 2025 年底淘汰 macos-13（用它会永远排队），
-          # 替代标签是 macos-15-intel。仍标 optional 兜底。
-          - os: macos-15-intel
-            artifact: macos-x86_64
-            optional: true
           - os: windows-latest
             artifact: windows-x64
+          - os: ubuntu-latest
+            artifact: linux-x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -218,11 +272,12 @@ jobs:
           pip install -r requirements-optional.txt
           pip install pyinstaller
 
-      - name: Linux 额外依赖（PyInstaller 需要 libpython 共享库）
+      - name: Linux 额外依赖（libpython 供 PyInstaller；tkinter 供目录选择框）
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libpython3.13 || sudo apt-get install -y -qq libpython3.12
+          sudo apt-get install -y -qq python3-tk
 
       - name: 下载 ONNX 模型（供 --bundle_model 使用）
         uses: actions/download-artifact@v4
@@ -241,12 +296,6 @@ jobs:
 
       - name: 构建
         shell: bash
-        env:
-          # 未配置证书时不签名；配置了 secrets 就会自动签名+公证
-          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set +e
           case "$RUNNER_OS" in
@@ -263,12 +312,6 @@ jobs:
               fi
               chmod +x packaging/build_linux.sh
               ./packaging/build_linux.sh > build.log 2>&1
-              ;;
-            macOS)
-              # create-dmg 只影响是否额外出 .dmg；装不上也已有 .app.zip 兜底
-              brew install create-dmg > /dev/null 2>&1 || echo "!! create-dmg 安装失败，将跳过 .dmg"
-              chmod +x packaging/build_macos.sh
-              ./packaging/build_macos.sh > build.log 2>&1
               ;;
             Windows)
               # Inno Setup 只用于生成安装程序，装不上也不影响 zip 绿色版
@@ -292,7 +335,6 @@ jobs:
           missing=""
           case "$RUNNER_OS" in
             Linux)   [ -n "$(ls dist/*.tar.gz 2>/dev/null)" ] || missing="$missing linux-tar.gz" ;;
-            macOS)   [ -n "$(ls dist/*.app.zip 2>/dev/null)" ] || missing="$missing macos-app.zip" ;;
             Windows) [ -n "$(ls dist/*.zip 2>/dev/null)" ] || missing="$missing windows-zip" ;;
           esac
           if [ -n "$missing" ]; then
@@ -303,13 +345,12 @@ jobs:
           # 期望但非必需的产物：缺失只告警，附带脚本给出的原因
           case "$RUNNER_OS" in
             Linux)   [ -n "$(ls dist/*.AppImage 2>/dev/null)" ] || echo "::warning title=未生成 AppImage::见上一条降级告警中的原因" ;;
-            macOS)   [ -n "$(ls dist/*.dmg 2>/dev/null)" ] || echo "::warning title=未生成 dmg::create-dmg 可能未安装" ;;
             Windows) [ -n "$(ls dist/*setup.exe 2>/dev/null)" ] || echo "::warning title=未生成安装程序::Inno Setup 可能未安装" ;;
           esac
 
           echo "=== 实际产物 ==="
           find dist -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \
-            -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \) \
+            -o -name "*.AppImage" -o -name "*.exe" \) \
             -exec du -h {} + 2>/dev/null || true
 
           exit $rc
@@ -318,13 +359,7 @@ jobs:
         if: ${{ github.event.inputs.bundle_model == 'true' }}
         shell: bash
         run: |
-          # PyInstaller 6 把 COLLECT 产物放在 .app/Contents/Frameworks，
-          # 6 之前放在 Contents/MacOS —— 两处都试，避免版本差异导致漏注入
-          for d in \
-            dist/email-assistant \
-            "dist/EmailAssistant.app/Contents/Frameworks" \
-            "dist/EmailAssistant.app/Contents/MacOS" \
-            "dist/EmailAssistant.app/Contents/Resources"; do
+          for d in dist/email-assistant; do
             if [ -d "$d" ]; then
               mkdir -p "$d/data/models"
               cp data/models/* "$d/data/models/" 2>/dev/null || true
@@ -338,7 +373,6 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
-            dist/*.dmg
             dist/*.AppImage
             dist/*setup.exe
           if-no-files-found: warn
@@ -358,7 +392,7 @@ jobs:
           echo
           echo "=== 发行包大小 ==="
           find dist -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \
-            -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \) \
+            -o -name "*.AppImage" -o -name "*.exe" \) \
             -exec du -h {} + 2>/dev/null || true
 
   # ---------------------------------------------------------------------------
@@ -383,7 +417,7 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \
-            -o -name "*.dmg" -o -name "*.AppImage" -o -name "*setup.exe" \) \
+            -o -name "*.AppImage" -o -name "*setup.exe" \) \
             -exec cp {} release/ \;
           # 模型作为独立附件一并发布，方便用户按需下载
           cp artifacts/onnx-model/bge-small-zh-v1.5-onnx.zip release/ 2>/dev/null \
@@ -460,12 +494,13 @@ jobs:
 
             | 平台 | 文件 | 说明 |
             |---|---|---|
-            | Windows | `*-setup.exe` | 安装程序（推荐） |
-            | Windows | `*-windows-x64.zip` | 绿色免安装版 |
-            | macOS (Apple Silicon) | `*-macos-arm64.dmg` | 拖入「应用程序」即可 |
-            | macOS (Intel) | `*-macos-x86_64.dmg` | 同上 |
+            | **Windows** | `EmailAssistant-*-windows-setup.exe` | 安装程序（推荐） |
+            | **Windows** | `email-assistant-*-windows-x64.zip` | 绿色免安装版 |
             | Linux | `*.AppImage` | `chmod +x` 后直接运行 |
             | Linux | `*-linux-x86_64.tar.gz` | 解压即用 |
+
+            > macOS 暂不提供：构建脚本仍在 `packaging/build_macos.sh`，
+            > 但未纳入 CI，也未做过真机验证。
 
             ## 启用语义检索
 

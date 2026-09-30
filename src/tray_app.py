@@ -51,6 +51,22 @@ except Exception:  # noqa: BLE001 pragma: no cover
 
 INTERVAL_CHOICES = (5, 10, 15, 30, 60)
 
+#: 托盘标题。Windows / macOS 的后端按 Unicode 处理，可以用中文；
+#: 而 pystray 的 **X11 后端用 latin-1 编码 WM_NAME**，中文会在**构造 Icon 时**
+#: 直接抛 UnicodeEncodeError，导致整个托盘起不来（实测确认）。
+TRAY_TITLE_ZH = "邮件管理助手"
+TRAY_TITLE_ASCII = "Email Assistant"
+
+
+def tray_title() -> str:
+    """按平台选择托盘标题。
+
+    Linux/X11 只能安全使用 ASCII；这不是偏好问题，是避免托盘直接崩溃。
+    """
+    if sys.platform.startswith("linux"):
+        return TRAY_TITLE_ASCII
+    return TRAY_TITLE_ZH
+
 
 def has_display() -> bool:
     """判断当前环境是否具备图形界面。"""
@@ -199,12 +215,7 @@ class TrayApplication:
             pystray.MenuItem("退出", self._action_quit),
         )
 
-        self._icon = pystray.Icon(
-            "email-assistant",
-            icon=build_icon_image(),
-            title="邮件管理助手",
-            menu=menu,
-        )
+        self._icon = self._build_icon(menu)
         try:
             self._icon.run()
         except Exception:  # noqa: BLE001
@@ -213,6 +224,30 @@ class TrayApplication:
         finally:
             self.shutdown()
         return 0
+
+    def _build_icon(self, menu):  # type: ignore[no-untyped-def]
+        """构造托盘图标，并在后端不支持非 ASCII 标题时自动降级。
+
+        某些后端（如 pystray 的 X11 实现）用 latin-1 编码窗口标题，
+        中文会直接抛 UnicodeEncodeError。这里兜住，保证托盘仍能起来，
+        而不是让用户看到一个什么都点不到的图标。
+        """
+        assert pystray is not None
+        title = tray_title()
+        try:
+            return pystray.Icon(
+                "email-assistant", icon=build_icon_image(), title=title, menu=menu
+            )
+        except UnicodeEncodeError:
+            logger.warning(
+                "当前托盘后端不支持非 ASCII 标题（%s），回退为英文标题", title
+            )
+            return pystray.Icon(
+                "email-assistant",
+                icon=build_icon_image(),
+                title=TRAY_TITLE_ASCII,
+                menu=menu,
+            )
 
     def shutdown(self) -> None:
         logger.info("正在退出…")
@@ -446,8 +481,9 @@ class TrayApplication:
         self._status_text = message
         if self._icon is not None:
             try:
-                self._icon.title = f"邮件管理助手 —— {message[:60]}"
-                self._icon.notify(message, "邮件管理助手")
+                # 标题必须是后端可编码的（X11 为 latin-1），不能直接拼中文
+                self._icon.title = f"{tray_title()} - {message[:60]}"
+                self._icon.notify(message, tray_title())
                 return
             except Exception:  # noqa: BLE001
                 logger.debug("托盘通知失败", exc_info=True)

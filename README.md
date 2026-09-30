@@ -514,38 +514,37 @@ ONNX 推理链路（用合成模型，无需下载真实模型）。
 PyInstaller / Nuitka 都不是交叉编译器——它们把**当前平台**的原生解释器和
 二进制打进包里。因此：
 
-| 目标平台 | 必须在哪构建 |
-|---|---|
-| Windows `.exe` / 安装程序 | Windows |
-| macOS `.app` / `.dmg` | macOS（且签名公证需要 Apple 开发者账号） |
-| Linux `tar.gz` / AppImage | Linux |
+| 目标平台 | 必须在哪构建 | 当前是否交付 |
+|---|---|---|
+| Windows `.exe` / 安装程序 | Windows | ✅ **主要目标** |
+| Linux `tar.gz` / AppImage | Linux | ✅ 用于验证打包链路 |
+| macOS `.app` / `.dmg` | macOS（签名公证还需 Apple 账号） | ⏸ 已搁置 |
 
 这与有没有 .NET 环境无关（.NET 的跨平台发布只适用于 .NET 程序，
 本项目是 Python + FastAPI + onnxruntime + chromadb）。
 
-**拿到三平台产物的两条路：**
+**拿到产物的两条路：**
 
-1. **CI（推荐）**——`.github/workflows/build.yml` 用 GitHub 的原生 runner
-   并行构建四个目标（`linux-x86_64` / `macos-arm64` / `macos-x86_64` /
-   `windows-x64`），打 tag 时自动创建 Release。推到 GitHub 即可。
-2. **各平台本地构建**——用下面的脚本：
+1. **CI（推荐）**——`.github/workflows/build.yml` 用 GitHub 原生 runner
+   并行构建 `windows-x64` 与 `linux-x86_64`，打 tag 时自动创建 Release。
+2. **本地构建**——在对应系统上运行：
 
 ```bash
-./packaging/build_linux.sh        # Linux
-./packaging/build_macos.sh        # macOS
 packaging\build_windows.ps1       # Windows (PowerShell)
+./packaging/build_linux.sh        # Linux
 ```
+
+> macOS 已搁置：`packaging/build_macos.sh` 保留但未纳入 CI、未做真机验证，
+> 官方 Release 不含 macOS 产物。
 
 ### 产物
 
 | 平台 | 文件 | 说明 |
 |---|---|---|
-| Windows | `*-setup.exe` | Inno Setup 安装程序（含开始菜单/开机启动选项） |
-| Windows | `*-windows-x64.zip` | 绿色免安装 |
-| macOS | `邮件管理助手.app` | 双击即用，托盘常驻，不在 Dock 显示 |
-| macOS | `*.dmg` | 拖入「应用程序」（需 `brew install create-dmg`） |
-| Linux | `*.AppImage` | `chmod +x` 直接运行（需 `appimagetool`） |
-| Linux | `*-linux-x86_64.tar.gz` | 解压即用 |
+| **Windows** | `EmailAssistant-<版本>-windows-setup.exe` | Inno Setup 安装程序（含开始菜单/开机启动选项） |
+| **Windows** | `email-assistant-<版本>-windows-x64.zip` | 绿色免安装 |
+| Linux | `EmailAssistant-<版本>-linux-x86_64.AppImage` | `chmod +x` 直接运行 |
+| Linux | `email-assistant-<版本>-linux-x86_64.tar.gz` | 解压即用 |
 | 全部 | `bge-small-zh-v1.5-onnx.zip` | 独立的 ONNX 模型附件 |
 
 每个包内都附带 `快速上手.txt`（中文入门指引）。
@@ -567,11 +566,11 @@ FTS5、IMAP 库、FastAPI、加密）有一项不通过就中止打包。
 |---|---|
 | 源码运行 | 项目根目录 |
 | Windows / Linux 打包版 | **可执行文件所在目录**（绿色版习惯） |
-| macOS `.app` | `~/Library/Application Support/EmailAssistant/` |
 | 任意场景 | 环境变量 `EMAIL_ASSISTANT_HOME` 可整体重定位 |
 
-macOS 用用户目录是必须的：应用包签名后只读，且升级时整包替换，
-把用户数据放进去会直接丢失。
+> macOS 若将来恢复，数据目录需放到 `~/Library/Application Support/EmailAssistant/`：
+> 应用包签名后只读，且升级时整包替换，把用户数据放进去会直接丢失。
+> 该分支逻辑已在 `runtime_root()` 中实现，但未验证。
 
 ### 关于 ONNX 模型
 
@@ -586,22 +585,12 @@ macOS 用用户目录是必须的：应用包签名后只读，且升级时整�
 
 CI 里也可以勾选 `bundle_model` 把模型直接打进包里（开箱即用，但包体翻倍）。
 
-### macOS 签名与公证
+### macOS（已搁置）
 
-未签名的应用在 Apple Silicon 上会被 Gatekeeper 拦截，用户必须
-「右键 → 打开」才能运行。正式分发需要：
-
-```bash
-export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-export APPLE_ID="you@example.com"
-export APPLE_TEAM_ID="TEAMID"
-export APPLE_APP_PASSWORD="app-specific-password"
-./packaging/build_macos.sh
-```
-
-脚本检测到这些变量会自动签名 + 公证 + 装订。CI 中把它们配成
-Repository secrets 即可（`MACOS_CODESIGN_IDENTITY` / `APPLE_ID` /
-`APPLE_TEAM_ID` / `APPLE_APP_PASSWORD`）。
+`packaging/build_macos.sh` 与 spec 里的 `BUNDLE` 段仍然保留，
+但**未纳入 CI、未做真机验证，也未经签名/公证测试**，官方 Release 不含 macOS 产物。
+将来恢复时至少要补齐：真机完整跑通、`.app` 内设置界面可打开、
+Developer ID 签名 + notarytool 公证。
 
 ### 打包时的几个坑（已修）
 

@@ -517,32 +517,212 @@ class TestVersionSingleSource:
         assert "0.1." not in src_text, "kb_api 里不应再硬编码版本号"
         assert __version__
 
-    def test_spec_reads_version_dynamically(self) -> None:
-        from src.config import PROJECT_ROOT
+    #: 仓库根：必须用 __file__ 推导。
+    #: 不能用 src.config.PROJECT_ROOT —— 它随 EMAIL_ASSISTANT_HOME 变化
+    #: （CI 的测试任务恰好会设这个变量），届时这些文件根本找不到。
+    REPO_ROOT = Path(__file__).resolve().parent.parent
 
-        spec = (PROJECT_ROOT / "packaging" / "email-assistant.spec").read_text(encoding="utf-8")
+    def test_spec_reads_version_dynamically(self) -> None:
+        spec = (self.REPO_ROOT / "packaging" / "email-assistant.spec").read_text(encoding="utf-8")
         assert "_read_version()" in spec
         assert 'CFBundleShortVersionString": APP_VERSION' in spec
 
     def test_pyproject_uses_dynamic_version(self) -> None:
-        from src.config import PROJECT_ROOT
-
-        text = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        text = (self.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         assert 'dynamic = ["version"]' in text
         assert 'attr = "src.__version__"' in text
 
     def test_installer_has_no_hardcoded_release_version(self) -> None:
-        from src.config import PROJECT_ROOT
-
-        text = (PROJECT_ROOT / "packaging" / "installer.iss").read_text(encoding="utf-8-sig")
+        text = (self.REPO_ROOT / "packaging" / "installer.iss").read_text(encoding="utf-8-sig")
         assert '#define MyAppVersion "0.0.0"' in text, "安装脚本应由构建脚本传入版本"
 
     def test_spec_version_parser_matches_package(self, tmp_path: Path) -> None:
         """spec 里的正则必须能解析出与包一致的版本。"""
         import re
 
-        from src import __version__, config
+        from src import __version__
 
-        text = (config.PROJECT_ROOT / "src" / "__init__.py").read_text(encoding="utf-8")
+        text = (self.REPO_ROOT / "src" / "__init__.py").read_text(encoding="utf-8")
         match = re.search(r'__version__\s*=\s*"([^"]+)"', text)
         assert match and match.group(1) == __version__
+
+
+class TestRepoRootUsageConvention:
+    """静态约定检查：测试不得用 src.config.PROJECT_ROOT 定位仓库文件。
+
+    该项目根会随 EMAIL_ASSISTANT_HOME 变化（这是**受支持的用户配置**），
+    而 CI 的测试任务恰好会设这个变量。我已经因此踩了两次坑
+    （test_config 的 doctor 测试、test_infrastructure 的版本测试），
+    两次都是本地全绿、CI 全红。这类"本地过、CI 挂"最难排查，
+    所以用一条静态检查把约定固化下来。
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+
+    #: 合理的例外：这里两边都用同一个模块常量推导，
+    #: 断言的是"回退行为"而非某个绝对路径，因此不受 PROJECT_ROOT 变化影响。
+    ALLOWLIST = {
+        "test_security.py": "断言 SecretStore 在无 source_path 时回退到模块的 config 目录，"
+                            "左右两侧同源推导，自洽",
+    }
+
+    def test_no_test_uses_config_project_root_for_repo_files(self) -> None:
+        offenders: list[str] = []
+        self_name = Path(__file__).name
+        for path in sorted((self.REPO_ROOT / "tests").glob("test_*.py")):
+            if path.name in (self_name, *self.ALLOWLIST):
+                continue
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("#") or stripped.startswith('"'):
+                    continue
+                if "config.PROJECT_ROOT" in stripped or (
+                    "import PROJECT_ROOT" in stripped
+                ):
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+        assert not offenders, (
+            "以下位置用可被 EMAIL_ASSISTANT_HOME 覆盖的 PROJECT_ROOT 定位仓库文件，"
+            "在 CI 上必然失败；请改用 Path(__file__).resolve().parent.parent：\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_allowlist_entries_still_exist(self) -> None:
+        """例外清单里的文件必须真实存在，避免清单腐烂。"""
+        tests_dir = self.REPO_ROOT / "tests"
+        for name in self.ALLOWLIST:
+            assert (tests_dir / name).is_file(), f"例外清单指向了不存在的文件：{name}"
+
+    def test_suite_passes_with_home_override(self) -> None:
+        """确保没有其它地方隐含依赖"PROJECT_ROOT 就是仓库根"。"""
+        import os
+
+        from src.config import runtime_root
+
+        original = os.environ.get("EMAIL_ASSISTANT_HOME")
+        try:
+            os.environ["EMAIL_ASSISTANT_HOME"] = "/tmp/ea-convention-probe"
+            assert runtime_root() != self.REPO_ROOT
+        finally:
+            if original is None:
+                os.environ.pop("EMAIL_ASSISTANT_HOME", None)
+            else:
+                os.environ["EMAIL_ASSISTANT_HOME"] = original
+
+
+class TestTrayTitleEncoding:
+    """回归：pystray 的 X11 后端用 latin-1 编码窗口标题，中文会直接崩。
+
+    实测：`pystray.Icon(title="邮件管理助手")` 在 X11 上抛
+    UnicodeEncodeError，整个托盘起不来。而这条路径在无头环境下
+    （pystray 在 import 阶段就失败、直接降级守护模式）从未被执行过。
+    """
+
+    def test_linux_uses_ascii_title(self) -> None:
+        import sys
+
+        from src.tray_app import TRAY_TITLE_ASCII, tray_title
+
+        if sys.platform.startswith("linux"):
+            assert tray_title() == TRAY_TITLE_ASCII
+            tray_title().encode("latin-1")  # 必须能被 latin-1 编码
+        else:
+            assert tray_title()  # 其它平台用中文
+
+    def test_title_is_always_latin1_encodable_on_linux(self) -> None:
+        from src import tray_app
+
+        original = tray_app.sys.platform
+        try:
+            tray_app.sys.platform = "linux"
+            tray_app.tray_title().encode("latin-1")
+        finally:
+            tray_app.sys.platform = original
+
+    def test_build_icon_falls_back_on_unicode_error(self, tmp_config) -> None:
+        """后端不支持非 ASCII 标题时必须降级，而不是让托盘起不来。"""
+        from src import tray_app
+
+        if not tray_app.TRAY_AVAILABLE:
+            pytest.skip("未安装 pystray/Pillow")
+
+        attempts: list[str] = []
+
+        class FakeIcon:
+            def __init__(self, name, icon=None, title=None, menu=None):
+                attempts.append(title)
+                if title and any(ord(c) > 255 for c in title):
+                    raise UnicodeEncodeError("latin-1", title, 0, 1, "不支持中文")
+                self.title = title
+
+        class FakePystray:
+            Icon = FakeIcon
+
+        original = tray_app.pystray
+        try:
+            tray_app.pystray = FakePystray
+            app = tray_app.TrayApplication.__new__(tray_app.TrayApplication)
+            icon = app._build_icon(menu=None)
+            assert len(attempts) == 2, "应先尝试原标题，再回退"
+            assert icon.title.encode("latin-1")
+        finally:
+            tray_app.pystray = original
+
+    def test_build_icon_no_retry_when_title_ok(self, tmp_config) -> None:
+        from src import tray_app
+
+        if not tray_app.TRAY_AVAILABLE:
+            pytest.skip("未安装 pystray/Pillow")
+
+        attempts: list[str] = []
+
+        class FakeIcon:
+            def __init__(self, name, icon=None, title=None, menu=None):
+                attempts.append(title)
+                self.title = title
+
+        class FakePystray:
+            Icon = FakeIcon
+
+        original = tray_app.pystray
+        try:
+            tray_app.pystray = FakePystray
+            app = tray_app.TrayApplication.__new__(tray_app.TrayApplication)
+            app._build_icon(menu=None)
+            assert len(attempts) == 1
+        finally:
+            tray_app.pystray = original
+
+
+class TestFolderPickerAvailability:
+    def test_pick_directory_reports_missing_tkinter(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """没有 tkinter 时要给出可读原因，前端好退回手工输入。"""
+        import builtins
+
+        from src.settings_service import SettingsService
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name.startswith("tkinter"):
+                raise ImportError("No module named 'tkinter'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        result = SettingsService(context.config).pick_directory()
+        assert result["ok"] is False
+        assert "不支持目录选择框" in result["error"]
+
+    def test_pick_directory_reports_no_display(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.settings_service import SettingsService
+        from src.tray_app import has_display
+
+        if not has_display():
+            result = SettingsService(context.config).pick_directory()
+            assert result["ok"] is False
+            assert "图形界面" in result["error"] or "不支持" in result["error"]
