@@ -112,7 +112,10 @@ jobs:
           python -m pip install --upgrade pip
           # PyPI 默认的 torch 会带上 2-3GB 的 CUDA 依赖，必须显式用 CPU 索引
           pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
-          pip install optimum-onnx
+          # onnxruntime 在 optimum-onnx 里属于 [onnxruntime] extra，不是硬依赖。
+          # 不装的话导出到"修正动态轴"这一步会报
+          #   RuntimeError: The onnx and onnxruntime packages are necessary...
+          pip install optimum-onnx onnxruntime
 
       - name: 缓存 HuggingFace 模型
         uses: actions/cache@v4
