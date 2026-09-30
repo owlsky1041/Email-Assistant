@@ -147,6 +147,9 @@ exec "$HERE/usr/bin/email-assistant" "$@"
 EOF
   chmod +x "$APPDIR/AppRun"
 
+  # AppImage 强制要求：.desktop 里必须有 Icon=，且 AppDir 内确实存在同名图标
+  # （.png/.svg/.xpm）。缺任一条件 appimagetool 会以
+  #   "Icon entry not found in desktop file" 失败。
   cat > "$APPDIR/email-assistant.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -154,18 +157,24 @@ Name=邮件管理助手
 Name[en]=Email Assistant
 Comment=腾讯企业邮箱邮件归档与知识库检索
 Exec=email-assistant tray
+Icon=email-assistant
 Terminal=false
 Categories=Office;Email;
 EOF
 
+  if [ ! -f packaging/icon.png ]; then
+    echo "    ! 缺少 packaging/icon.png，正在生成"
+    "$PY" packaging/make_icons.py >/dev/null 2>&1 || true
+  fi
   if [ -f packaging/icon.png ]; then
     cp packaging/icon.png "$APPDIR/email-assistant.png"
+  else
+    echo "    ! 无法生成图标，AppImage 构建会失败"
   fi
 
-  # appimagetool 自身就是一个 AppImage，正常执行依赖 FUSE。
-  # 而 CI 容器/精简 runner 往往没有 FUSE，直接运行会报
-  #   "failed to open elf at /lib64/ld-linux-x86-64.so.2" 之类错误。
-  # 因此先试直接运行，失败则解包后运行（--appimage-extract-and-run 的等价做法）。
+  # 某些版本发布的 appimagetool 自身是 AppImage，执行依赖 FUSE；
+  # 另一些版本是静态 ELF（continuous 现在如此）。为兼容两者：
+  # 先直接运行，失败再解包运行。
   run_appimagetool() {
     if ARCH="$ARCH" appimagetool "$@" 2>/dev/null; then
       return 0

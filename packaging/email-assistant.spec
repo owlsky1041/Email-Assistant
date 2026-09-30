@@ -43,6 +43,13 @@ datas: list[tuple[str, str]] = [
     (str(PROJECT_ROOT / "README.md"), "."),
 ]
 
+# 应用图标（由 packaging/make_icons.py 生成）
+ICON_PNG = PROJECT_ROOT / "packaging" / "icon.png"
+ICON_ICO = PROJECT_ROOT / "packaging" / "icon.ico"
+ICON_ICNS = PROJECT_ROOT / "packaging" / "icon.icns"
+# PyInstaller 只认 Windows 的 .ico 与 macOS 的 .icns；Linux 下传图标会告警
+EXE_ICON = str(ICON_ICO) if sys.platform == "win32" else None
+
 binaries: list[tuple[str, str]] = []
 
 
@@ -209,6 +216,7 @@ exe = EXE(  # noqa: F821
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=EXE_ICON,
 )
 
 # --- 托盘程序：Windows 下不弹控制台窗口，双击即常驻 ---
@@ -228,6 +236,7 @@ exe_tray = EXE(  # noqa: F821
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=EXE_ICON,
 )
 
 coll = COLLECT(  # noqa: F821
@@ -249,7 +258,7 @@ if sys.platform == "darwin":
         # 包目录名用 ASCII：macOS 惯例，也避免 PyInstaller 处理非 ASCII
         # 路径时的不确定性。界面上显示的名字由 CFBundleDisplayName 决定。
         name="EmailAssistant.app",
-        icon=None,  # 有图标时填 str(PROJECT_ROOT / "packaging" / "icon.icns")
+        icon=str(ICON_ICNS) if ICON_ICNS.is_file() else None,
         bundle_identifier="com.emailassistant.desktop",
         info_plist={
             "CFBundleName": "邮件管理助手",

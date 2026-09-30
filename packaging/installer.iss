@@ -42,6 +42,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 ; 安装包本身较大（300MB+），关闭不必要的动画提示
 WizardStyle=modern
+SetupIconFile=icon.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 卸载时保留用户数据（由 [Code] 段询问）
 UninstallDisplayName={#MyAppName}
 
