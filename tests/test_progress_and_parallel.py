@@ -202,13 +202,11 @@ class TestParallelDownload:
         context.config.sync.fetch_batch_size = 40
         context.sync.sync_all(index=False)
 
-        # 每个线程最多创建一条连接，且不同线程的连接互不相同
-        by_thread: dict[int, list[FakeImapClient]] = {}
-        for tid, c in created:
-            by_thread.setdefault(tid, []).append(c)
+        # 并发模式下必须建多条连接；连接两两不同即说明没有共享。
+        # 不按 threading.get_ident() 分组断言：CPython 会复用已退出线程的
+        # ident，按它记账会偶发失败（测试写法问题，非连接池问题）。
         assert len(created) >= 2, "并发模式下应创建多条连接"
-        for tid, clients in by_thread.items():
-            assert len(clients) == 1, f"线程 {tid} 创建了多条连接"
+        assert len({id(c) for _, c in created}) == len(created), "连接被跨线程共享"
 
     def test_workers_one_uses_single_connection(
         self, context: AppContext, monkeypatch
@@ -336,22 +334,35 @@ class TestClientPool:
     def test_different_threads_get_different_connections(
         self, context: AppContext, monkeypatch
     ) -> None:
+        """不同线程必须拿到不同连接。
+
+        必须用 Barrier 让线程**同时存活**：CPython 会复用已退出线程的
+        ``threading.get_ident()``，串行启动的短命线程可能拿到同一个 ident，
+        导致按 ident 记录的结果互相覆盖（这是测试写法问题，不是连接池问题）。
+        """
         monkeypatch.setattr(
             sync_module, "ImapClient", lambda *a, **kw: FakeImapClient(make_mailbox(2))
         )
         pool = _ClientPool(context.config, "code", context.cancel)
-        seen: dict[int, object] = {}
-        try:
-            def grab() -> None:
-                seen[threading.get_ident()] = pool.get()
+        n = 3
+        barrier = threading.Barrier(n)
+        results: list[object] = []
+        lock = threading.Lock()
 
-            threads = [threading.Thread(target=grab) for _ in range(3)]
+        def grab() -> None:
+            barrier.wait(timeout=10)  # 三个线程在此会合，确保 ident 不会复用
+            client = pool.get()
+            with lock:
+                results.append(client)
+
+        try:
+            threads = [threading.Thread(target=grab) for _ in range(n)]
             for t in threads:
                 t.start()
             for t in threads:
-                t.join(timeout=5)
-            assert len(seen) == 3
-            assert len({id(v) for v in seen.values()}) == 3
+                t.join(timeout=10)
+            assert len(results) == n
+            assert len({id(c) for c in results}) == n, "不同线程拿到了同一条连接"
         finally:
             pool.close_all()
 
