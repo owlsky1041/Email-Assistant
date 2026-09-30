@@ -406,6 +406,7 @@ jobs:
           set -uo pipefail
           TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"
+          echo "::notice title=清理环境::gh=$(command -v gh || echo 缺失) token=$([ -n "${GH_TOKEN:-}" ] && echo 已设置 || echo 为空)"
 
           # 先按 tag 查；查不到再遍历 releases 按 tag_name 匹配。
           # 必须这样兜底：删除并重新推送 tag 时，Release 对象仍保留，
@@ -423,13 +424,21 @@ jobs:
           fi
 
           echo "清理 Release $TAG (id=$rid) 的旧产物"
-          gh api "repos/$REPO/releases/$rid/assets?per_page=100" --jq '.[].id' \
-            | while read -r aid; do
-                [ -n "$aid" ] || continue
-                echo "  删除 asset $aid"
-                gh api -X DELETE "repos/$REPO/releases/assets/$aid" || true
-              done
-          echo "清理完成"
+          ids=$(gh api "repos/$REPO/releases/$rid/assets?per_page=100" --jq '.[].id' 2>/dev/null || true)
+          total=$(printf '%s\n' "$ids" | grep -c . || true)
+          deleted=0
+          for aid in $ids; do
+            if gh api -X DELETE "repos/$REPO/releases/assets/$aid" >/dev/null 2>&1; then
+              deleted=$((deleted + 1))
+            fi
+          done
+          echo "清理完成：发现 $total 个产物，删除 $deleted 个"
+          # 把结果写成注解：注解可匿名读取，便于确认清理是否真的生效
+          echo "::notice title=Release 产物清理::tag=$TAG rid=$rid 发现=${total} 删除=${deleted}"
+
+          # 清理后再次核对，残留则告警（避免再次出现新旧混杂却无人察觉）
+          left=$(gh api "repos/$REPO/releases/$rid/assets?per_page=100" --jq 'length' 2>/dev/null || echo "?")
+          echo "::notice title=清理后剩余产物数::${left}"
 
       - uses: softprops/action-gh-release@v2
         with:
