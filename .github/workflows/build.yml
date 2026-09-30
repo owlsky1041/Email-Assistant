@@ -412,10 +412,19 @@ jobs:
           # 必须这样兜底：删除并重新推送 tag 时，Release 对象仍保留，
           # 但 /releases/tags/<tag> 会 404 —— 只用前者会漏掉清理，
           # 结果新产物被"追加"到旧 Release 上，新旧混杂。
-          rid=$(gh api "repos/$REPO/releases/tags/$TAG" --jq .id 2>/dev/null || true)
+          # 关键：gh api 在 404 时会把**错误 JSON 打到 stdout**，
+          # `--jq .id` 照样处理它并返回非空字符串，再用 `|| true` 吞掉
+          # 非零退出码，rid 就变成了 {"message":"Not Found"...} 这样的垃圾值，
+          # 后续按它查询必然一无所获，兜底分支也永远不会触发。
+          # 因此必须校验 rid 是纯数字。
+          _numeric_or_empty() { case "$1" in '' | *[!0-9]*) printf '' ;; *) printf '%s' "$1" ;; esac; }
+
+          rid=$(_numeric_or_empty "$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null)")
           if [ -z "$rid" ]; then
-            rid=$(gh api "repos/$REPO/releases?per_page=100" \
-                    --jq ".[] | select(.tag_name==\"$TAG\") | .id" 2>/dev/null | head -1 || true)
+            # 兜底：按 tag_name 遍历。覆盖"tag 被删除后重新推送、
+            # /releases/tags/<tag> 暂时 404 但 Release 仍存在"的情况。
+            rid=$(_numeric_or_empty "$(gh api "repos/$REPO/releases?per_page=100" \
+                    --jq ".[] | select(.tag_name==\"$TAG\") | .id" 2>/dev/null | head -1)")
           fi
 
           if [ -z "$rid" ]; then
@@ -425,6 +434,8 @@ jobs:
 
           echo "清理 Release $TAG (id=$rid) 的旧产物"
           ids=$(gh api "repos/$REPO/releases/$rid/assets?per_page=100" --jq '.[].id' 2>/dev/null || true)
+          # 只保留纯数字 id，防止错误 JSON 混入
+          ids=$(printf '%s\n' "$ids" | grep -E '^[0-9]+$' || true)
           total=$(printf '%s\n' "$ids" | grep -c . || true)
           deleted=0
           for aid in $ids; do
