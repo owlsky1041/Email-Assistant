@@ -403,16 +403,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -uo pipefail
           TAG="${GITHUB_REF_NAME}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "检测到已存在的 Release $TAG，清理旧产物"
-            gh release view "$TAG" --json assets --jq '.assets[].name' \
-              | while read -r name; do
-                  [ -n "$name" ] && gh release delete-asset "$TAG" "$name" -y || true
-                done
-          else
-            echo "尚无 Release $TAG，跳过清理"
+          REPO="${GITHUB_REPOSITORY}"
+
+          # 先按 tag 查；查不到再遍历 releases 按 tag_name 匹配。
+          # 必须这样兜底：删除并重新推送 tag 时，Release 对象仍保留，
+          # 但 /releases/tags/<tag> 会 404 —— 只用前者会漏掉清理，
+          # 结果新产物被"追加"到旧 Release 上，新旧混杂。
+          rid=$(gh api "repos/$REPO/releases/tags/$TAG" --jq .id 2>/dev/null || true)
+          if [ -z "$rid" ]; then
+            rid=$(gh api "repos/$REPO/releases?per_page=100" \
+                    --jq ".[] | select(.tag_name==\"$TAG\") | .id" 2>/dev/null | head -1 || true)
           fi
+
+          if [ -z "$rid" ]; then
+            echo "尚无 Release $TAG，跳过清理"
+            exit 0
+          fi
+
+          echo "清理 Release $TAG (id=$rid) 的旧产物"
+          gh api "repos/$REPO/releases/$rid/assets?per_page=100" --jq '.[].id' \
+            | while read -r aid; do
+                [ -n "$aid" ] || continue
+                echo "  删除 asset $aid"
+                gh api -X DELETE "repos/$REPO/releases/assets/$aid" || true
+              done
+          echo "清理完成"
 
       - uses: softprops/action-gh-release@v2
         with:
