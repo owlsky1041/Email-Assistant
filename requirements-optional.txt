@@ -1,0 +1,28 @@
+# 可选增强依赖 —— 按需安装，不装也能跑（自动降级）
+#
+#   pip install -r requirements-optional.txt
+
+# ---- 桌面托盘（二选一即可，pystray 更轻量） ----
+pystray>=0.19.5
+Pillow>=10.2.0
+# PyQt6>=6.6        # 需要更丰富的托盘菜单时启用
+# PySide6>=6.6
+
+# ---- 系统气泡通知（不装则复用托盘气泡 / 控制台提示） ----
+plyer>=2.1.0
+
+# ---- 向量库：ChromaDB（优先方案） ----
+chromadb>=0.4.24
+
+# ---- 本地嵌入模型：ONNXRuntime 后端（§11.4 轻量化首选，无需 PyTorch） ----
+# 依赖体积约 200MB，远小于 torch
+onnxruntime>=1.17
+tokenizers>=0.15
+numpy>=1.26
+
+# ---- 本地嵌入模型：SentenceTransformer 后端（体积大，~2GB，非首选） ----
+# sentence-transformers>=2.5
+# torch>=2.2
+
+# ---- sqlite-vec：SQLite 原生向量扩展（可选加速） ----
+# sqlite-vec>=0.1.0

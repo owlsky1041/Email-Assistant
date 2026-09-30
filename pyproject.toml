@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "email-assistant"
+version = "0.1.0"
+description = "腾讯企业邮箱邮件管理助手：IMAP 增量同步、Markdown 归档、本地知识库检索 API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["email", "imap", "rag", "knowledge-base", "tencent-exmail", "sqlite", "fts5"]
+
+dependencies = [
+    "PyYAML>=6.0.1",
+    "pydantic>=2.5,<3",
+    "imap-tools>=1.2.0",
+    "beautifulsoup4>=4.12.2",
+    "markdownify>=0.11.6",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+    "APScheduler>=3.10,<4",
+    "python-dateutil>=2.8.2",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+# 精简版语义检索：ONNX 推理，不引入 PyTorch
+onnx = ["onnxruntime>=1.17", "tokenizers>=0.15", "numpy>=1.26"]
+chroma = ["chromadb>=0.4.24"]
+tray = ["pystray>=0.19.5", "Pillow>=10.2.0", "plyer>=2.1.0"]
+full = [
+    "onnxruntime>=1.17", "tokenizers>=0.15", "numpy>=1.26",
+    "chromadb>=0.4.24",
+    "pystray>=0.19.5", "Pillow>=10.2.0", "plyer>=2.1.0",
+]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27", "pyinstaller>=6.0"]
+
+[project.scripts]
+email-assistant = "src.cli:main"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]

@@ -1,0 +1,34 @@
+# 腾讯企业邮箱邮件管理助手 —— 核心依赖
+# 安装：pip install -r requirements.txt
+#
+# 设计原则：核心依赖保持轻量，保证「解压即用、离线可跑」。
+# 重量级可选依赖（向量库 / 嵌入模型 / 桌面托盘）见 requirements-optional.txt，
+# 未安装时程序会自动降级到内置的纯 Python 实现，不会崩溃。
+
+# ---- 配置与校验 ----
+PyYAML>=6.0.1
+pydantic>=2.5,<3
+
+# ---- IMAP 拉取（§11.2 严禁直接使用原生 imaplib） ----
+imap-tools>=1.2.0
+
+# ---- HTML 清洗与转换 ----
+beautifulsoup4>=4.12.2
+markdownify>=0.11.6
+
+# ---- 本地服务 ----
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+
+# ---- 定时任务 ----
+APScheduler>=3.10,<4
+
+# ---- 工具 ----
+python-dateutil>=2.8.2
+cryptography>=42.0   # 授权码本地加密存储
+
+# ---- 测试 ----
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.27          # FastAPI TestClient 依赖

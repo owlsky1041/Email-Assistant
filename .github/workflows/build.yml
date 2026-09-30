@@ -1,0 +1,326 @@
+name: 构建三平台发行包
+
+# PyInstaller / Nuitka 都**不支持交叉编译**，因此必须在各目标系统上原生构建。
+# 这个工作流用 GitHub 的原生 runner 完成这件事：
+#
+#   test          —— 在 ubuntu / macos / windows 上跑测试，验证跨平台正确性
+#   export-model  —— 导出 ONNX 嵌入模型并作为独立发行附件发布
+#   build         —— 三平台并行打包，产出 .tar.gz / .zip / .app / .dmg / setup.exe
+#   release       —— 打 tag 时自动创建 Release 并附上全部产物
+#
+# 想在自己机器上构建：见 packaging/build_{linux,macos,windows}.*
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      bundle_model:
+        description: "把 ONNX 模型打进发行包（体积 +95MB，但开箱即用语义检索）"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # 注意：不要在这里强制 HF_ENDPOINT=https://hf-mirror.com。
+  # GitHub runner 在海外，直连 huggingface.co 更快更稳；设成镜像反而拖慢。
+  # 中国大陆用户本地构建时，自行 export HF_ENDPOINT=https://hf-mirror.com
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 跨平台测试
+  # ---------------------------------------------------------------------------
+  test:
+    name: 测试 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+        exclude:
+          # macOS/Windows 上只跑一个版本，省 CI 时间
+          - os: macos-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # 装上可选依赖，让 ChromaDB / ONNX 相关测试真正执行而不是被 skip
+          pip install -r requirements-optional.txt
+
+      - name: 运行测试
+        run: python -m pytest tests/ -v
+        env:
+          # 测试不应触碰真实配置
+          EMAIL_ASSISTANT_HOME: ${{ runner.temp }}/ea-test-home
+
+  # ---------------------------------------------------------------------------
+  # 2) 导出 ONNX 嵌入模型
+  # ---------------------------------------------------------------------------
+  export-model:
+    name: 导出 ONNX 嵌入模型
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装导出工具链（CPU-only，避免拉取 CUDA 依赖）
+        run: |
+          python -m pip install --upgrade pip
+          # PyPI 默认的 torch 会带上 2-3GB 的 CUDA 依赖，必须显式用 CPU 索引
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
+          pip install optimum-onnx
+
+      - name: 缓存 HuggingFace 模型
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-bge-small-zh-v1.5
+
+      - name: 导出 ONNX
+        run: |
+          optimum-cli export onnx \
+            --model BAAI/bge-small-zh-v1.5 \
+            --task feature-extraction \
+            --opset 17 \
+            ./data/models
+
+      - name: 校验导出结果
+        run: |
+          python -m pip install -r requirements.txt
+          python - <<'PY'
+          import sys; sys.path.insert(0, ".")
+          from src.embedder import OnnxEmbedder
+          e = OnnxEmbedder("data/models")
+          print("维度:", e.dimension, "推荐阈值:", e.recommended_min_score)
+          vs = e.embed(["差旅报销发票", "服务器扩容", "今天天气"])
+          assert len(vs) == 3 and len(vs[0]) == e.dimension
+          import math
+          for v in vs:
+              assert abs(math.sqrt(sum(x*x for x in v)) - 1.0) < 1e-4, "向量未归一化"
+          print("模型自检通过")
+          PY
+
+      - name: 打包模型
+        run: |
+          cd data/models
+          zip -r ../../bge-small-zh-v1.5-onnx.zip . -x "*.tmp"
+          cd ../..
+          ls -lh bge-small-zh-v1.5-onnx.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onnx-model
+          path: bge-small-zh-v1.5-onnx.zip
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 3) 三平台打包
+  # ---------------------------------------------------------------------------
+  build:
+    name: 打包 (${{ matrix.os }})
+    needs: [test, export-model]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+          - os: macos-latest
+            artifact: macos-arm64
+          # Intel Mac。GitHub 正在淘汰 macos-13，用 continue-on-error 兜底：
+          # 即使该 runner 不可用，也不影响 arm64 与其它平台的发布。
+          - os: macos-13
+            artifact: macos-x86_64
+            optional: true
+          - os: windows-latest
+            artifact: windows-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-optional.txt
+          pip install pyinstaller
+
+      - name: Linux 额外依赖（PyInstaller 需要 libpython 共享库）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpython3.13 || sudo apt-get install -y -qq libpython3.12
+
+      - name: 下载 ONNX 模型（供 --bundle_model 使用）
+        uses: actions/download-artifact@v4
+        with:
+          name: onnx-model
+          path: model-artifact
+
+      - name: 解压模型
+        shell: bash
+        run: |
+          mkdir -p data/models
+          if [ -f model-artifact/bge-small-zh-v1.5-onnx.zip ]; then
+            unzip -o model-artifact/bge-small-zh-v1.5-onnx.zip -d data/models
+            ls -lh data/models
+          fi
+
+      # ----- Linux -----
+      - name: 构建（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x packaging/build_linux.sh
+          ./packaging/build_linux.sh
+
+      # ----- macOS -----
+      - name: 构建（macOS）
+        if: runner.os == 'macOS'
+        env:
+          # 未配置证书时不签名；配置了 secrets 就会自动签名+公证
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          chmod +x packaging/build_macos.sh
+          ./packaging/build_macos.sh
+
+      # ----- Windows -----
+      - name: 构建（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Inno Setup 用于生成安装程序；失败也不影响 zip
+          choco install innosetup --no-progress -y
+          ./packaging/build_windows.ps1
+
+      - name: 把模型打进发行包
+        if: ${{ github.event.inputs.bundle_model == 'true' }}
+        shell: bash
+        run: |
+          # PyInstaller 6 把 COLLECT 产物放在 .app/Contents/Frameworks，
+          # 6 之前放在 Contents/MacOS —— 两处都试，避免版本差异导致漏注入
+          for d in \
+            dist/email-assistant \
+            "dist/邮件管理助手.app/Contents/Frameworks" \
+            "dist/邮件管理助手.app/Contents/MacOS" \
+            "dist/邮件管理助手.app/Contents/Resources"; do
+            if [ -d "$d" ]; then
+              mkdir -p "$d/data/models"
+              cp data/models/* "$d/data/models/" 2>/dev/null || true
+              echo "已注入模型到 $d"
+            fi
+          done
+
+      - name: 列出产物
+        shell: bash
+        run: ls -lhR dist/ | head -40
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*setup.exe
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 4) 发布（仅在打 tag 时）
+  # ---------------------------------------------------------------------------
+  release:
+    name: 创建 Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 整理产物
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \
+            -o -name "*.dmg" -o -name "*.AppImage" -o -name "*setup.exe" \) \
+            -exec cp {} release/ \;
+          # 模型作为独立附件一并发布，方便用户按需下载
+          cp artifacts/onnx-model/bge-small-zh-v1.5-onnx.zip release/ 2>/dev/null \
+            || echo "未找到模型附件，跳过"
+          ls -lh release/
+
+      - name: 生成校验和
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## 下载
+
+            | 平台 | 文件 | 说明 |
+            |---|---|---|
+            | Windows | `*-setup.exe` | 安装程序（推荐） |
+            | Windows | `*-windows-x64.zip` | 绿色免安装版 |
+            | macOS (Apple Silicon) | `*-macos-arm64.dmg` | 拖入「应用程序」即可 |
+            | macOS (Intel) | `*-macos-x86_64.dmg` | 同上 |
+            | Linux | `*.AppImage` | `chmod +x` 后直接运行 |
+            | Linux | `*-linux-x86_64.tar.gz` | 解压即用 |
+
+            ## 启用语义检索
+
+            发行包默认不含 95MB 的 ONNX 嵌入模型（仅有词法检索兜底）。
+            下载下面的模型附件后，一条命令即可启用真正的语义检索：
+
+            ```bash
+            # 解压模型附件到本地目录，然后导入
+            ./email-assistant model import /path/to/bge-small-zh-v1.5-onnx
+            ./email-assistant index --rebuild
+            ```
+
+            详见 README 的「启用真正的语义检索」。
+
+            ## 校验
+
+            下载后可用 `SHA256SUMS.txt` 校验完整性。
