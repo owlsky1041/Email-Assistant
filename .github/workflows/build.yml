@@ -293,10 +293,6 @@ jobs:
             fi
           done
 
-      - name: 列出产物
-        shell: bash
-        run: ls -lhR dist/ | head -40
-
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -308,6 +304,23 @@ jobs:
             dist/*setup.exe
           if-no-files-found: warn
           retention-days: 30
+
+      # 纯展示步骤：必须放在上传之后，且不能因为自身出错而拖垮整个任务。
+      # 早先写成 `ls -lhR dist/ | head -40`，GitHub Actions 的 bash 默认启用
+      # -o pipefail，head 提前关闭管道会让 ls 收到 SIGPIPE（退出码 141），
+      # 于是这一步失败并**跳过了产物上传** —— 打包明明成功却拿不到产物。
+      - name: 列出产物
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "=== dist 顶层 ==="
+          ls -la dist/ 2>/dev/null || true
+          echo
+          echo "=== 发行包大小 ==="
+          find dist -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \
+            -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \) \
+            -exec du -h {} + 2>/dev/null || true
 
   # ---------------------------------------------------------------------------
   # 4) 发布（仅在打 tag 时）
