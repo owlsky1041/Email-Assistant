@@ -6,7 +6,7 @@
 # 产物：
 #   dist/email-assistant/                    可执行目录（绿色版，解压即用）
 #   dist/email-assistant-<版本>-linux-x86_64.tar.gz
-#   dist/邮件管理助手-<版本>-x86_64.AppImage  （若安装了 appimagetool）
+#   dist/EmailAssistant-<版本>-linux-x86_64.AppImage（若安装了 appimagetool）
 #
 # 说明：PyInstaller 不支持交叉编译。要得到 Windows/macOS 产物，
 #       必须在对应系统上运行各自的构建脚本，或使用 CI（见 .github/workflows/build.yml）。
@@ -189,8 +189,9 @@ EOF
     return 1
   }
 
-  if run_appimagetool "$APPDIR" "dist/邮件管理助手-${VERSION}-${ARCH}.AppImage"; then
-    echo "    → dist/邮件管理助手-${VERSION}-${ARCH}.AppImage"
+  APPIMAGE="dist/EmailAssistant-${VERSION}-linux-${ARCH}.AppImage"
+  if run_appimagetool "$APPDIR" "$APPIMAGE"; then
+    echo "    → $APPIMAGE"
   else
     echo "    ! AppImage 构建失败（不影响 tar.gz）"
   fi

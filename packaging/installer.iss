@@ -34,7 +34,8 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename={#MyAppName}-{#MyAppVersion}-setup
+; 产物名用 ASCII：GitHub Release 会剥掉非 ASCII 字符
+OutputBaseFilename=EmailAssistant-{#MyAppVersion}-windows-setup
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible

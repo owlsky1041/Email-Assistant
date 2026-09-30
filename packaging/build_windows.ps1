@@ -5,7 +5,7 @@
 # 产物：
 #   dist\email-assistant\                                  可执行目录（绿色版）
 #   dist\email-assistant-<版本>-windows-x64.zip
-#   dist\邮件管理助手-<版本>-setup.exe                    安装程序（需 Inno Setup 6）
+#   dist\EmailAssistant-<版本>-windows-setup.exe           安装程序（需 Inno Setup 6）
 #
 # 说明：PyInstaller 不支持交叉编译，Windows 产物必须在 Windows 上构建，
 #       或使用 CI（.github\workflows\build.yml 的 windows-latest 任务）。
@@ -196,7 +196,7 @@ if ($SkipInstaller) {
         Write-Host "==> 构建安装程序"
         & $Iscc "/DMyAppVersion=$Version" "packaging\installer.iss"
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "    -> dist\邮件管理助手-$Version-setup.exe" -ForegroundColor Green
+            Write-Host "    -> dist\EmailAssistant-$Version-windows-setup.exe" -ForegroundColor Green
         } else {
             Write-Host "    ! 安装程序构建失败（不影响 zip）" -ForegroundColor Yellow
         }

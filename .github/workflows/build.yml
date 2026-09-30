@@ -396,6 +396,24 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # 重新发布同一个 tag 时（例如修好产物名后重发），旧产物会残留成
+      # 一堆过时文件。这里先清空，保证 Release 内容始终与本次构建一致。
+      - name: 清理该 Release 的旧产物
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "检测到已存在的 Release $TAG，清理旧产物"
+            gh release view "$TAG" --json assets --jq '.assets[].name' \
+              | while read -r name; do
+                  [ -n "$name" ] && gh release delete-asset "$TAG" "$name" -y || true
+                done
+          else
+            echo "尚无 Release $TAG，跳过清理"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
