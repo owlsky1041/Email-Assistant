@@ -554,7 +554,7 @@ packaging\build_windows.ps1       # Windows (PowerShell)
 
 ```
 dist/email-assistant/                     334 MB   onedir 目录
-dist/email-assistant-0.1.0-linux-x86_64.tar.gz   146 MB
+dist/email-assistant-<版本>-linux-x86_64.tar.gz   146 MB
 ```
 
 打包产物**自带 Python 运行时与全部依赖**，目标机器无需安装 Python。

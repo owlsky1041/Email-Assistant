@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +35,19 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # spec 位于 packaging/ 下，其父目录即项目根
 PROJECT_ROOT = Path(SPECPATH).resolve().parent  # noqa: F821
+
+# 版本号单一来源：从 src/__init__.py 解析，避免打包配置与代码版本不一致
+def _read_version() -> str:
+    init = PROJECT_ROOT / "src" / "__init__.py"
+    try:
+        match = re.search(r'__version__\s*=\s*"([^"]+)"', init.read_text(encoding="utf-8"))
+        return match.group(1) if match else "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+APP_VERSION = _read_version()
+print(f"[spec] 版本 {APP_VERSION}")
 
 # ---------------------------------------------------------------------------
 # 数据与二进制收集
@@ -279,8 +293,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "邮件管理助手",
             "CFBundleDisplayName": "邮件管理助手",
-            "CFBundleShortVersionString": "0.1.0",
-            "CFBundleVersion": "0.1.0",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
             # 托盘常驻程序：不在 Dock 中显示

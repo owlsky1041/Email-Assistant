@@ -492,3 +492,57 @@ class TestWindowsConsoleEncoding:
         monkeypatch.setattr(cli_module, "_force_utf8_console", lambda: seen.append(True))
         cli_module.main(["--version"])
         assert seen == [True]
+
+
+class TestVersionSingleSource:
+    """版本号必须只有一个来源（src/__init__.py）。
+
+    回归：曾经在 kb_api、spec、installer.iss、pyproject 各写一份 0.1.0，
+    发布时极易出现"程序报 0.1.0 而安装包写 0.1.1"的不一致。
+    """
+
+    def test_package_exposes_version(self) -> None:
+        from src import __version__
+
+        assert __version__
+        assert __version__.count(".") >= 1
+
+    def test_kb_api_uses_package_version(self) -> None:
+        import inspect
+
+        from src import __version__, kb_api
+
+        src_text = inspect.getsource(kb_api.create_app)
+        assert "version=__version__" in src_text
+        assert "0.1." not in src_text, "kb_api 里不应再硬编码版本号"
+        assert __version__
+
+    def test_spec_reads_version_dynamically(self) -> None:
+        from src.config import PROJECT_ROOT
+
+        spec = (PROJECT_ROOT / "packaging" / "email-assistant.spec").read_text(encoding="utf-8")
+        assert "_read_version()" in spec
+        assert 'CFBundleShortVersionString": APP_VERSION' in spec
+
+    def test_pyproject_uses_dynamic_version(self) -> None:
+        from src.config import PROJECT_ROOT
+
+        text = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert 'dynamic = ["version"]' in text
+        assert 'attr = "src.__version__"' in text
+
+    def test_installer_has_no_hardcoded_release_version(self) -> None:
+        from src.config import PROJECT_ROOT
+
+        text = (PROJECT_ROOT / "packaging" / "installer.iss").read_text(encoding="utf-8-sig")
+        assert '#define MyAppVersion "0.0.0"' in text, "安装脚本应由构建脚本传入版本"
+
+    def test_spec_version_parser_matches_package(self, tmp_path: Path) -> None:
+        """spec 里的正则必须能解析出与包一致的版本。"""
+        import re
+
+        from src import __version__, config
+
+        text = (config.PROJECT_ROOT / "src" / "__init__.py").read_text(encoding="utf-8")
+        match = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+        assert match and match.group(1) == __version__

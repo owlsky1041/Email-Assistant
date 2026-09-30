@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .config import AppConfig, resolve_api_token
 from .context import AppContext
 from .markdown_exporter import MarkdownExporter
@@ -74,7 +75,7 @@ def create_app(context: AppContext) -> FastAPI:
             "腾讯企业邮箱邮件管理助手的本地只读检索接口。\n\n"
             "仅监听回环地址，供本机智能体 / RAG 系统调用。"
         ),
-        version="0.1.0",
+        version=__version__,
         docs_url="/docs",
         redoc_url="/redoc",
     )

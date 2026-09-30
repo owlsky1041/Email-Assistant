@@ -2,7 +2,7 @@
 ;
 ; 用法（在 Windows 上，先跑完 build_windows.ps1 生成 dist\email-assistant）：
 ;
-;   ISCC.exe /DMyAppVersion=0.1.0 packaging\installer.iss
+;   ISCC.exe /DMyAppVersion=x.y.z packaging\installer.iss   （构建脚本会自动传入）
 ;
 ; 设计要点
 ; --------
@@ -21,7 +21,7 @@
 #define MyAppCliName "email-assistant.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.0.0"
 #endif
 
 [Setup]
