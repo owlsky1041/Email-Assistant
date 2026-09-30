@@ -33,6 +33,25 @@ logger = logging.getLogger(__name__)
 # 输出辅助
 # ---------------------------------------------------------------------------
 
+def _force_utf8_console() -> None:
+    """让标准输出使用 UTF-8。
+
+    Windows 控制台默认使用区域代码页（英文系统是 cp1252/cp437），
+    此时 ``print("中文")`` 会直接抛 ``UnicodeEncodeError``，
+    整个命令崩掉。Python 3.7+ 的 ``reconfigure`` 可避免要求用户
+    先手动执行 ``chcp 65001``。
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def _supports_color() -> bool:
     return sys.stdout.isatty() and sys.platform != "win32"
 
@@ -914,6 +933,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)
 

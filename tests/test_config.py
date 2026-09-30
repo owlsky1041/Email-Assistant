@@ -330,20 +330,27 @@ class TestDoctorJsonOutput:
         env = dict(os.environ)
         env["EMAIL_ASSISTANT_HOME"] = str(tmp_path / "home")
 
+        # 必须显式指定 encoding="utf-8"：
+        # Windows 上 text=True 会按区域设置（cp1252）解码，而 doctor 输出
+        # 中文与 ✓/✗ 符号，必然抛 UnicodeDecodeError。
+        run_kwargs = dict(
+            cwd=self.REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=180,
+        )
+
         # 先初始化：没有配置文件时 doctor 会提前返回，后面的检查不会执行
         init = subprocess.run(
-            [sys.executable, "main.py", "init", "--non-interactive"],
-            cwd=self.REPO_ROOT, capture_output=True, text=True, env=env, timeout=180,
+            [sys.executable, "main.py", "init", "--non-interactive"], **run_kwargs
         )
         assert init.returncode == 0, f"init 失败：{init.stderr}"
 
         proc = subprocess.run(
-            [sys.executable, "main.py", "doctor", "--json", *extra],
-            cwd=self.REPO_ROOT,
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=180,
+            [sys.executable, "main.py", "doctor", "--json", *extra], **run_kwargs
         )
         # 把 stderr 带上，便于诊断（空 stdout 时尤其重要）
         assert proc.stdout.strip(), (

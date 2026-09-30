@@ -29,6 +29,10 @@ concurrency:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Windows runner 默认代码页是 cp1252，统一 UTF-8，
+  # 否则中文输出与文件读写会出现编码问题
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
   # 注意：不要在这里强制 HF_ENDPOINT=https://hf-mirror.com。
   # GitHub runner 在海外，直连 huggingface.co 更快更稳；设成镜像反而拖慢。
   # 中国大陆用户本地构建时，自行 export HF_ENDPOINT=https://hf-mirror.com
@@ -67,10 +71,27 @@ jobs:
           pip install -r requirements-optional.txt
 
       - name: 运行测试
-        run: python -m pytest tests/ -v
+        shell: bash
         env:
           # 测试不应触碰真实配置
           EMAIL_ASSISTANT_HOME: ${{ runner.temp }}/ea-test-home
+          # Windows runner 默认 cp1252，强制 UTF-8，否则中文输出会解码失败
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          set +e
+          python -m pytest tests/ -v --tb=short > pytest.log 2>&1
+          rc=$?
+          tail -60 pytest.log
+
+          if [ $rc -ne 0 ]; then
+            # 失败用例名写入注解，便于快速定位（注解可匿名读取）
+            failed=$(grep -E "^(FAILED|ERROR) " pytest.log | head -15 | sed 's/ - .*//' | tr '\n' ';')
+            echo "::error title=pytest 失败::${failed:-未知，见下方完整日志}"
+            echo "----- 失败详情 -----"
+            grep -E "^(FAILED|ERROR) " -A 12 pytest.log | head -150
+          fi
+          exit $rc
 
   # ---------------------------------------------------------------------------
   # 2) 导出 ONNX 嵌入模型
@@ -100,12 +121,29 @@ jobs:
           key: hf-bge-small-zh-v1.5
 
       - name: 导出 ONNX
+        shell: bash
         run: |
+          set +e
+          mkdir -p data/models
+
+          # 不显式指定 --opset：optimum 对 bert 推荐 opset>=18，
+          # 硬写 17 会告警"可能失败"，实测在不同 torch 版本下确实会挂。
           optimum-cli export onnx \
             --model BAAI/bge-small-zh-v1.5 \
             --task feature-extraction \
-            --opset 17 \
-            ./data/models
+            data/models > export.log 2>&1
+          rc=$?
+
+          tail -40 export.log
+
+          if [ $rc -ne 0 ]; then
+            # 把错误尾部写进注解：注解可匿名读取，便于无 token 时定位问题
+            err=$(tail -c 600 export.log | tr '\n' ' ' | tr -s ' ')
+            echo "::error title=ONNX 导出失败::${err}"
+            echo "----- 完整日志 -----"
+            cat export.log
+          fi
+          exit $rc
 
       - name: 校验导出结果
         run: |

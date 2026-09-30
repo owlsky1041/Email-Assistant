@@ -436,3 +436,59 @@ class TestOptionalImportProbe:
         ok, reason = optional_import_works("exploding_module")
         assert ok is False
         assert "RuntimeError" in reason
+
+
+class TestWindowsConsoleEncoding:
+    """回归测试：Windows 控制台默认代码页不是 UTF-8。
+
+    `print("中文")` 在英文版 Windows（cp1252/cp437）上会抛
+    UnicodeEncodeError 并让命令直接崩溃。CLI 启动时必须把
+    stdout/stderr 切到 UTF-8。
+    """
+
+    def test_reconfigure_is_called(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src import cli as cli_module
+
+        called: list[dict] = []
+
+        class FakeStream:
+            def reconfigure(self, **kwargs):
+                called.append(kwargs)
+
+        monkeypatch.setattr(cli_module.sys, "stdout", FakeStream())
+        monkeypatch.setattr(cli_module.sys, "stderr", FakeStream())
+        cli_module._force_utf8_console()
+
+        assert len(called) == 2
+        assert all(c["encoding"] == "utf-8" for c in called)
+        assert all(c["errors"] == "replace" for c in called)
+
+    def test_survives_stream_without_reconfigure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """被重定向到不支持 reconfigure 的对象时不能报错。"""
+        from src import cli as cli_module
+
+        class Bare:
+            pass
+
+        monkeypatch.setattr(cli_module.sys, "stdout", Bare())
+        monkeypatch.setattr(cli_module.sys, "stderr", Bare())
+        cli_module._force_utf8_console()  # 不应抛异常
+
+    def test_survives_reconfigure_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src import cli as cli_module
+
+        class Broken:
+            def reconfigure(self, **kwargs):
+                raise OSError("不支持的终端")
+
+        monkeypatch.setattr(cli_module.sys, "stdout", Broken())
+        monkeypatch.setattr(cli_module.sys, "stderr", Broken())
+        cli_module._force_utf8_console()
+
+    def test_main_calls_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from src import cli as cli_module
+
+        seen: list[bool] = []
+        monkeypatch.setattr(cli_module, "_force_utf8_console", lambda: seen.append(True))
+        cli_module.main(["--version"])
+        assert seen == [True]
