@@ -1,4 +1,4 @@
-# 构建 Windows 发行包（必须在 Windows 上执行）
+﻿# 构建 Windows 发行包（必须在 Windows 上执行）
 #
 #   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 #
@@ -105,7 +105,8 @@ $Readme | Out-File -FilePath "dist\email-assistant\快速上手.txt" -Encoding U
 # ---- 4. 打包 zip（绿色版）-------------------------------------------------
 $Zip = "dist\email-assistant-$Version-windows-x64.zip"
 Write-Host "==> 打包 $Zip"
-Compress-Archive -Path "dist\email-assistant\*" -DestinationPath $Zip -Force
+# 保留顶层 email-assistant\ 目录，与 Linux/macOS 的 tar 布局一致
+Compress-Archive -Path "dist\email-assistant" -DestinationPath $Zip -Force
 $ZipSize = [math]::Round((Get-Item $Zip).Length / 1MB, 1)
 Write-Host "    -> $Zip ($ZipSize MB)"
 

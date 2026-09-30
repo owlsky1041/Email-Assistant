@@ -44,6 +44,7 @@ jobs:
   test:
     name: 测试 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +100,7 @@ jobs:
   export-model:
     name: 导出 ONNX 嵌入模型
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -184,6 +186,7 @@ jobs:
     name: 打包 (${{ matrix.os }})
     needs: [test, export-model]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
@@ -193,9 +196,9 @@ jobs:
             artifact: linux-x86_64
           - os: macos-latest
             artifact: macos-arm64
-          # Intel Mac。GitHub 正在淘汰 macos-13，用 continue-on-error 兜底：
-          # 即使该 runner 不可用，也不影响 arm64 与其它平台的发布。
-          - os: macos-13
+          # Intel Mac。GitHub 已于 2025 年底淘汰 macos-13（用它会永远排队），
+          # 替代标签是 macos-15-intel。仍标 optional 兜底。
+          - os: macos-15-intel
             artifact: macos-x86_64
             optional: true
           - os: windows-latest
@@ -236,16 +239,8 @@ jobs:
             ls -lh data/models
           fi
 
-      # ----- Linux -----
-      - name: 构建（Linux）
-        if: runner.os == 'Linux'
-        run: |
-          chmod +x packaging/build_linux.sh
-          ./packaging/build_linux.sh
-
-      # ----- macOS -----
-      - name: 构建（macOS）
-        if: runner.os == 'macOS'
+      - name: 构建
+        shell: bash
         env:
           # 未配置证书时不签名；配置了 secrets 就会自动签名+公证
           CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
@@ -253,17 +248,32 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          chmod +x packaging/build_macos.sh
-          ./packaging/build_macos.sh
+          set +e
+          case "$RUNNER_OS" in
+            Linux)
+              chmod +x packaging/build_linux.sh
+              ./packaging/build_linux.sh > build.log 2>&1
+              ;;
+            macOS)
+              chmod +x packaging/build_macos.sh
+              ./packaging/build_macos.sh > build.log 2>&1
+              ;;
+            Windows)
+              # Inno Setup 只用于生成安装程序，装不上也不影响 zip 绿色版
+              choco install innosetup --no-progress -y || echo "!! Inno Setup 安装失败，将只产出 zip"
+              pwsh -NoProfile -File packaging/build_windows.ps1 > build.log 2>&1
+              ;;
+          esac
+          rc=$?
 
-      # ----- Windows -----
-      - name: 构建（Windows）
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Inno Setup 用于生成安装程序；失败也不影响 zip
-          choco install innosetup --no-progress -y
-          ./packaging/build_windows.ps1
+          tail -60 build.log
+
+          if [ $rc -ne 0 ]; then
+            # 写进注解：注解可匿名读取，无需 token 即可定位失败原因
+            err=$(tail -c 900 build.log | tr '\n' ' ' | tr -s ' ')
+            echo "::error title=打包失败 ($RUNNER_OS)::${err}"
+          fi
+          exit $rc
 
       - name: 把模型打进发行包
         if: ${{ github.event.inputs.bundle_model == 'true' }}
@@ -307,6 +317,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:

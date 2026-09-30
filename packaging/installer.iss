@@ -1,4 +1,4 @@
-; Inno Setup 脚本 —— Windows 安装程序
+﻿; Inno Setup 脚本 —— Windows 安装程序
 ;
 ; 用法（在 Windows 上，先跑完 build_windows.ps1 生成 dist\email-assistant）：
 ;
@@ -44,7 +44,6 @@ PrivilegesRequired=admin
 WizardStyle=modern
 ; 卸载时保留用户数据（由 [Code] 段询问）
 UninstallDisplayName={#MyAppName}
-LicenseFile=..\README.md
 
 [Languages]
 Name: "chinese"; MessagesFile: "compiler:Default.isl"
