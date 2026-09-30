@@ -280,11 +280,38 @@ jobs:
 
           tail -60 build.log
 
-          if [ $rc -ne 0 ]; then
-            # 写进注解：注解可匿名读取，无需 token 即可定位失败原因
-            err=$(tail -c 900 build.log | tr '\n' ' ' | tr -s ' ')
-            echo "::error title=打包失败 ($RUNNER_OS)::${err}"
+          # 把脚本里的降级告警（以 "!!" 或 "! " 开头）汇总成注解。
+          # 这类"静默降级"会让产物悄悄缺失（例如 AppImage 没生成、
+          # setup.exe 没生成），只看任务成功与否完全发现不了。
+          warns=$(grep -E '^\s*(!!|! )' build.log | head -12 | sed 's/^[[:space:]]*//' | tr '\n' '|')
+          if [ -n "$warns" ]; then
+            echo "::warning title=构建降级告警 ($RUNNER_OS)::${warns}"
           fi
+
+          # 校验关键产物确实存在，缺失就失败，避免"绿色但没东西"
+          missing=""
+          case "$RUNNER_OS" in
+            Linux)   [ -n "$(ls dist/*.tar.gz 2>/dev/null)" ] || missing="$missing linux-tar.gz" ;;
+            macOS)   [ -n "$(ls dist/*.app.zip 2>/dev/null)" ] || missing="$missing macos-app.zip" ;;
+            Windows) [ -n "$(ls dist/*.zip 2>/dev/null)" ] || missing="$missing windows-zip" ;;
+          esac
+          if [ -n "$missing" ]; then
+            echo "::error title=关键产物缺失 ($RUNNER_OS)::${missing}"
+            rc=1
+          fi
+
+          # 期望但非必需的产物：缺失只告警，附带脚本给出的原因
+          case "$RUNNER_OS" in
+            Linux)   [ -n "$(ls dist/*.AppImage 2>/dev/null)" ] || echo "::warning title=未生成 AppImage::见上一条降级告警中的原因" ;;
+            macOS)   [ -n "$(ls dist/*.dmg 2>/dev/null)" ] || echo "::warning title=未生成 dmg::create-dmg 可能未安装" ;;
+            Windows) [ -n "$(ls dist/*setup.exe 2>/dev/null)" ] || echo "::warning title=未生成安装程序::Inno Setup 可能未安装" ;;
+          esac
+
+          echo "=== 实际产物 ==="
+          find dist -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \
+            -o -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \) \
+            -exec du -h {} + 2>/dev/null || true
+
           exit $rc
 
       - name: 把模型打进发行包
