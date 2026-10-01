@@ -89,6 +89,8 @@ class TestSharding:
         附件指向**不同 inode** —— 去重静默失效、磁盘占用翻倍，而且只在
         并发下偶发。
         """
+        if not _hardlink_supported(tmp_path):
+            pytest.skip("当前文件系统不支持硬链接，测不到 inode 复用")
         store = BlobStore(tmp_path)
         digest = _digest_of(PAYLOAD)
         linked: list[Path] = []
@@ -122,10 +124,11 @@ class TestSharding:
 class TestVerify:
     def test_detects_corruption(self, tmp_path: Path) -> None:
         store = BlobStore(tmp_path)
+        digest = _digest_of(PAYLOAD)
         path = store.put_bytes(PAYLOAD)
-        assert store.verify(store.path_for.__self__ and sha256_file(path))
+        assert store.verify(digest), "刚写进去的应当校验通过"
         path.write_bytes(b"tampered")
-        assert not store.verify(sha256_file(Path("__missing__")) if False else _digest_of(PAYLOAD))
+        assert not store.verify(digest), "内容被改动后必须报错"
 
     def test_missing_blob_fails_verify(self, tmp_path: Path) -> None:
         store = BlobStore(tmp_path)

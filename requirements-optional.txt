@@ -10,9 +10,17 @@ Pillow>=10.2.0
 
 # ---- 系统气泡通知（不装则复用托盘气泡 / 控制台提示） ----
 plyer>=2.1.0
-# Linux 下 plyer 走 DBus，缺 dbus-python 时通知会静默失效并只打一条 warning。
-# 装了 KDE/GNOME 的桌面环境通常已有；无桌面环境则用 notify-send 兜底。
-dbus-python>=1.3.2; sys_platform == "linux"
+# Linux 下 plyer 走 DBus。dbus-python **刻意不列在这里**：
+#   * PyPI 上没有 manylinux 的预编译 wheel，pip 会退化为源码编译，
+#     而源码编译需要 libdbus-1-dev / libglib2.0-dev / pkg-config，
+#     pip 装不了这些系统包 —— 直接写进本文件会让 `pip install -r`
+#     在干净的 Linux 上必然失败（CI 就是这么红的）。
+#   * 发行版仓库里的 python3-dbus 才是正确的安装方式。
+#   * 缺它不会崩：notify 会退化为 notify-send，再不行只打一条 warning。
+# 需要系统通知时执行：
+#   Debian/Ubuntu: sudo apt install python3-dbus
+#   Fedora/RHEL:   sudo dnf install python3-dbus
+# dbus-python>=1.3.2; sys_platform == "linux"
 
 # ---- 向量库：ChromaDB（优先方案） ----
 chromadb>=0.4.24
@@ -22,6 +30,11 @@ chromadb>=0.4.24
 onnxruntime>=1.17
 tokenizers>=0.15
 numpy>=1.26
+# 运行时用不到 onnx，但**测试需要**：tests/test_onnx_embedder.py 用合成的小模型
+# 覆盖整条 ONNX 链路（会话创建→分词→前向→池化→归一化）。缺了它
+# pytest.importorskip 会让整个文件静默跳过 —— ONNX 是默认推荐后端，
+# 却在 CI 上一次都没被跑过。
+onnx>=1.16
 
 # ---- 本地嵌入模型：SentenceTransformer 后端（体积大，~2GB，非首选） ----
 # sentence-transformers>=2.5

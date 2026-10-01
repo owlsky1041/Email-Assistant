@@ -51,8 +51,12 @@ class TestLayout:
         base = AppConfig.resolve(".")
         assert portable_path(base / "data") == "./data"
 
-    def test_portable_path_keeps_outside_paths_absolute(self) -> None:
-        assert portable_path("/srv/elsewhere") == "/srv/elsewhere"
+    def test_portable_path_keeps_outside_paths_absolute(self, tmp_path: Path) -> None:
+        # 用 tmp_path 而不是写死 "/srv/..."：Windows 上 Path("/srv/x")
+        # 会被规范化成 "\\srv\\x"，写死 POSIX 路径的断言必然失败。
+        outside = tmp_path / "elsewhere"
+        assert portable_path(str(outside)) == str(outside)
+        assert not portable_path(str(outside)).startswith("./")
 
 
 class TestDetectRoot:

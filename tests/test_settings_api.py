@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -437,18 +438,23 @@ class TestFolderPickerViaSubprocess:
             returncode = 0
             stderr = b""
 
+        picked = str(Path(tempfile.gettempdir()) / "选中的目录")
+
         def fake_run(cmd, **kwargs):
             calls.append(list(cmd))
             # 模拟用户选中了目录：子进程把结果写进 --out 指定的文件
             out = Path(cmd[cmd.index("--out") + 1])
-            out.write_text("/tmp/选中的目录", encoding="utf-8")
+            out.write_text(picked, encoding="utf-8")
             return FakeCompleted()
 
         monkeypatch.setattr(sp, "run", fake_run)
 
-        result = SettingsService(context.config).pick_directory(initial="/tmp")
+        result = SettingsService(context.config).pick_directory(
+            initial=tempfile.gettempdir()
+        )
         assert result["ok"] is True
-        assert result["path"] == "/tmp/选中的目录"
+        # 返回值会经 Path() 规范化，各平台分隔符不同，比语义而不是比字面量
+        assert Path(result["path"]) == Path(picked)
         assert calls, "应当通过子进程执行，而不是在当前进程里调用 tkinter"
         assert "_pick-directory" in calls[0]
 
