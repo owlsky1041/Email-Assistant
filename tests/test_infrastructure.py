@@ -696,25 +696,27 @@ class TestTrayTitleEncoding:
 
 
 class TestFolderPickerAvailability:
-    def test_pick_directory_reports_missing_tkinter(
+    def test_pick_directory_checks_display_before_spawning(
         self, context: AppContext, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """没有 tkinter 时要给出可读原因，前端好退回手工输入。"""
-        import builtins
+        """无图形界面时直接返回，不去 spawn 子进程。
+
+        tkinter 缺失的报错改由子进程（`_pick-directory`）上报 ——
+        见 test_settings_api.TestPickDirectoryCliCommand。
+        这里只锁住"显示检查在前"这一顺序，避免无谓地拉起进程。
+        """
+        import subprocess as sp
 
         from src.settings_service import SettingsService
 
-        real_import = builtins.__import__
+        monkeypatch.setattr("src.tray_app.has_display", lambda: False)
+        spawned: list[object] = []
+        monkeypatch.setattr(sp, "run", lambda *a, **kw: spawned.append(a))
 
-        def fake_import(name, *args, **kwargs):
-            if name.startswith("tkinter"):
-                raise ImportError("No module named 'tkinter'")
-            return real_import(name, *args, **kwargs)
-
-        monkeypatch.setattr(builtins, "__import__", fake_import)
         result = SettingsService(context.config).pick_directory()
         assert result["ok"] is False
-        assert "不支持目录选择框" in result["error"]
+        assert "图形界面" in result["error"]
+        assert spawned == [], "无显示时不应启动子进程"
 
     def test_pick_directory_reports_no_display(
         self, context: AppContext, monkeypatch: pytest.MonkeyPatch

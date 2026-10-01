@@ -408,3 +408,180 @@ class TestSettingsAvailabilityIsVisible:
             body = c.get("/api/health").json()
         assert body["settings_ui"]["enabled"] is False
         assert body["settings_ui"]["reason"]
+
+
+class TestFolderPickerViaSubprocess:
+    """回归：目录选择框必须跑在**独立进程**里。
+
+    tkinter 的对话框要求在主线程运行。设置接口的调用发生在 FastAPI 的
+    工作线程中，在那里创建 Tk 窗口**不会显示**（实测：进程一直卡住，
+    窗口列表里什么都没有）。所以必须 spawn 子进程 ——
+    这一点在所有平台上都成立，不只是 Linux。
+    """
+
+    def test_uses_subprocess_not_inprocess_tkinter(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess as sp
+
+        from src import settings_service
+
+        monkeypatch.setattr(settings_service, "has_display", lambda: True, raising=False)
+        monkeypatch.setattr(
+            "src.tray_app.has_display", lambda: True
+        )
+
+        calls: list[list[str]] = []
+
+        class FakeCompleted:
+            returncode = 0
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            # 模拟用户选中了目录：子进程把结果写进 --out 指定的文件
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_text("/tmp/选中的目录", encoding="utf-8")
+            return FakeCompleted()
+
+        monkeypatch.setattr(sp, "run", fake_run)
+
+        result = SettingsService(context.config).pick_directory(initial="/tmp")
+        assert result["ok"] is True
+        assert result["path"] == "/tmp/选中的目录"
+        assert calls, "应当通过子进程执行，而不是在当前进程里调用 tkinter"
+        assert "_pick-directory" in calls[0]
+
+    def test_reports_cancel(self, context: AppContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess as sp
+
+        from src import settings_service
+
+        monkeypatch.setattr("src.tray_app.has_display", lambda: True)
+
+        class FakeCompleted:
+            returncode = 0
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            Path(cmd[cmd.index("--out") + 1]).write_text("", encoding="utf-8")
+            return FakeCompleted()
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        result = SettingsService(context.config).pick_directory()
+        assert result["ok"] is False
+        assert result["cancelled"] is True
+
+    def test_reports_timeout(self, context: AppContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess as sp
+
+        from src import settings_service
+
+        monkeypatch.setattr("src.tray_app.has_display", lambda: True)
+
+        def fake_run(cmd, **kwargs):
+            raise sp.TimeoutExpired(cmd, 1)
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        result = SettingsService(context.config).pick_directory()
+        assert result["ok"] is False
+        assert "超时" in result["error"]
+
+    def test_reports_subprocess_failure(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess as sp
+
+        from src import settings_service
+
+        monkeypatch.setattr("src.tray_app.has_display", lambda: True)
+
+        class FakeCompleted:
+            returncode = 3
+            stderr = "缺少 tkinter".encode("utf-8")
+
+        def fake_run(cmd, **kwargs):
+            Path(cmd[cmd.index("--out") + 1]).write_text("", encoding="utf-8")
+            return FakeCompleted()
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        result = SettingsService(context.config).pick_directory()
+        assert result["ok"] is False
+        assert "tkinter" in result["error"]
+
+    def test_temp_file_cleaned_up(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess as sp
+
+        from src import settings_service
+
+        monkeypatch.setattr("src.tray_app.has_display", lambda: True)
+        seen: list[Path] = []
+
+        class FakeCompleted:
+            returncode = 0
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[cmd.index("--out") + 1])
+            seen.append(out)
+            out.write_text("/tmp/x", encoding="utf-8")
+            return FakeCompleted()
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        SettingsService(context.config).pick_directory()
+        assert seen and not seen[0].exists(), "临时文件应当被清理"
+
+    def test_no_display_returns_clear_error(
+        self, context: AppContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("src.tray_app.has_display", lambda: False)
+        result = SettingsService(context.config).pick_directory()
+        assert result["ok"] is False
+        assert "图形界面" in result["error"]
+
+
+class TestPickDirectoryCliCommand:
+    """内部命令 `_pick-directory` 必须存在且把结果写进文件。"""
+
+    def test_command_registered(self) -> None:
+        from src.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["_pick-directory", "--out", "/tmp/x.txt"])
+        assert args.out == "/tmp/x.txt"
+        assert args.func.__name__ == "cmd_pick_directory"
+
+    def test_requires_out_argument(self) -> None:
+        from src.cli import build_parser
+
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["_pick-directory"])
+
+    def test_writes_empty_on_missing_tkinter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """没有 tkinter 时必须写出空文件并给出可读错误，而不是让父进程挂住。"""
+        import builtins
+
+        from src import cli
+
+        out = tmp_path / "result.txt"
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name.startswith("tkinter"):
+                raise ImportError("No module named 'tkinter'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        # 用 SimpleNamespace：类体里赋值会遮蔽外层同名变量
+        import types
+
+        args = types.SimpleNamespace(out=str(out), initial="")
+        rc = cli.cmd_pick_directory(args)  # type: ignore[arg-type]
+        assert rc == 3
+        assert out.read_text(encoding="utf-8") == ""

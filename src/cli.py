@@ -596,6 +596,65 @@ def cmd_serve(args: argparse.Namespace) -> int:
         context.close()
 
 
+def cmd_pick_directory(args: argparse.Namespace) -> int:
+    """内部命令：在**独立进程**中弹出目录选择框。
+
+    为什么必须是独立进程
+    --------------------
+    tkinter 的对话框要求跑在**主线程**。设置接口的调用发生在 FastAPI 的
+    工作线程里，在那里创建 Tk 窗口根本不会显示（实测：进程一直卡住，
+    窗口列表里什么都没有）。而独立进程天然拥有自己的主线程。
+
+    结果通过**临时文件**回传，而不是 stdout：打包成窗口版 exe 时
+    （``console=False``）``sys.stdout`` 可能是 None，管道不可靠。
+    """
+    out_file = args.out
+    if not out_file:
+        print("ERROR: 缺少 --out 参数", file=sys.stderr)
+        return 2
+
+    def _write(value: str) -> None:
+        try:
+            Path(out_file).write_text(value, encoding="utf-8")
+        except OSError:
+            pass
+
+    try:
+        import tkinter
+        from tkinter import filedialog
+    except Exception as exc:  # noqa: BLE001
+        _write("")
+        print(f"ERROR: 当前环境不支持目录选择框：{exc}", file=sys.stderr)
+        return 3
+
+    root = None
+    try:
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:  # noqa: BLE001 - 部分平台不支持
+            pass
+        chosen = filedialog.askdirectory(
+            title="选择数据存放目录",
+            initialdir=args.initial or None,
+            mustexist=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _write("")
+        print(f"ERROR: 目录选择失败：{exc}", file=sys.stderr)
+        return 4
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+
+    _write(str(chosen or ""))
+    return 0
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     """打开可视化设置界面（启动本地服务后自动打开浏览器）。"""
     import threading
@@ -918,6 +977,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", help="监听地址（默认取配置）")
     p_serve.add_argument("--port", type=int, help="监听端口（默认 8990）")
     p_serve.set_defaults(func=cmd_serve)
+
+    # 内部命令：供设置界面弹出目录选择框，不面向用户
+    p_pick = sub.add_parser("_pick-directory", help=argparse.SUPPRESS)
+    p_pick.add_argument("--out", required=True, help=argparse.SUPPRESS)
+    p_pick.add_argument("--initial", default="", help=argparse.SUPPRESS)
+    p_pick.set_defaults(func=cmd_pick_directory)
 
     p_settings = sub.add_parser("settings", help="打开可视化设置界面")
     p_settings.add_argument("--host", help="监听地址（默认取配置）")

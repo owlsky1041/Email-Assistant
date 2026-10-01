@@ -12,6 +12,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -45,9 +48,12 @@ class SettingsError(RuntimeError):
 class SettingsService:
     """封装设置读写与连通性测试。"""
 
+    #: 用户可能慢慢挑目录，给足时间；超时后再提示可手工输入
+    DIALOG_TIMEOUT = 600
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        #: 目录选择对话框可能需要多线程，串行化避免弹出多个
+        #: 目录选择对话框串行化，避免同时弹出多个
         self._dialog_lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -277,38 +283,73 @@ class SettingsService:
     def pick_directory(self, initial: str = "") -> dict[str, Any]:
         """弹出系统原生目录选择对话框。
 
-        仅在有图形界面时可用；无 GUI（服务器 / CI）时返回明确原因，
-        前端据此退回为手工输入路径。
+        **通过独立子进程执行**：tkinter 要求对话框跑在主线程，
+        而本方法由 FastAPI 的工作线程调用，在那里创建 Tk 窗口不会显示
+        （表现为请求一直挂起、用户什么也看不到）。
+
+        结果经临时文件回传，不依赖子进程的 stdout ——
+        打包成窗口版 exe（``console=False``）时 stdout 可能不可用。
         """
+        from .config import PROJECT_ROOT, is_frozen
+        from .tray_app import has_display
+
+        if not has_display():
+            return {"ok": False, "error": "当前环境没有图形界面，请手工输入路径"}
+
         with self._dialog_lock:
+            handle, out_name = tempfile.mkstemp(prefix="ea-pick-", suffix=".txt")
+            os.close(handle)
+            out_path = Path(out_name)
             try:
-                import tkinter  # noqa: F401
-                from tkinter import filedialog
-            except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "error": f"当前环境不支持目录选择框：{exc}"}
+                if is_frozen():
+                    # 打包后 sys.executable 就是本程序，直接复用自身的子命令
+                    cmd = [sys.executable, "_pick-directory", "--out", str(out_path)]
+                else:
+                    cmd = [
+                        sys.executable,
+                        str(PROJECT_ROOT / "main.py"),
+                        "_pick-directory",
+                        "--out",
+                        str(out_path),
+                    ]
+                if initial:
+                    cmd += ["--initial", initial]
 
-            from .tray_app import has_display
+                kwargs: dict[str, Any] = {
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    "timeout": self.DIALOG_TIMEOUT,
+                }
+                if sys.platform == "win32":
+                    # 避免弹出多余的控制台窗口
+                    kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-            if not has_display():
-                return {"ok": False, "error": "当前环境没有图形界面，请手工输入路径"}
+                try:
+                    proc = subprocess.run(cmd, **kwargs)
+                except subprocess.TimeoutExpired:
+                    return {"ok": False, "error": "等待目录选择超时，请重试或手工输入路径"}
+                except OSError as exc:
+                    return {"ok": False, "error": f"无法启动目录选择框：{exc}"}
 
-            try:
-                root = tkinter.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                chosen = filedialog.askdirectory(
-                    title="选择数据存放目录",
-                    initialdir=initial or str(_common_root(self.config)),
-                    mustexist=False,
-                )
-                root.destroy()
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("目录选择失败")
-                return {"ok": False, "error": f"目录选择失败：{exc}"}
+                raw = ""
+                try:
+                    raw = out_path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    raw = ""
 
-            if not chosen:
-                return {"ok": False, "cancelled": True, "error": "已取消"}
-            return {"ok": True, "path": str(Path(chosen))}
+                if not raw:
+                    if proc.returncode == 0:
+                        return {"ok": False, "cancelled": True, "error": "已取消"}
+                    detail = ""
+                    if proc.stderr:
+                        detail = proc.stderr.decode("utf-8", "replace").strip()
+                    return {
+                        "ok": False,
+                        "error": detail or f"目录选择框退出（代码 {proc.returncode}）",
+                    }
+                return {"ok": True, "path": str(Path(raw))}
+            finally:
+                out_path.unlink(missing_ok=True)
 
     def open_path(self, path: str) -> dict[str, Any]:
         """在系统文件管理器中打开目录。"""

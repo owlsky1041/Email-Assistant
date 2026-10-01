@@ -10,6 +10,9 @@ Pillow>=10.2.0
 
 # ---- 系统气泡通知（不装则复用托盘气泡 / 控制台提示） ----
 plyer>=2.1.0
+# Linux 下 plyer 走 DBus，缺 dbus-python 时通知会静默失效并只打一条 warning。
+# 装了 KDE/GNOME 的桌面环境通常已有；无桌面环境则用 notify-send 兜底。
+dbus-python>=1.3.2; sys_platform == "linux"
 
 # ---- 向量库：ChromaDB（优先方案） ----
 chromadb>=0.4.24
