@@ -764,10 +764,10 @@ def settings_command(config_path: str | None = None) -> list[str]:
 
 
 def window_available() -> bool:
-    """当前环境有没有图形界面。"""
-    if sys.platform in ("win32", "darwin"):
-        return True
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    """当前环境有没有图形界面（转发到包入口的唯一实现）。"""
+    from . import window_available as _impl
+
+    return _impl()
 
 
 def open_window_process(*, config_path: str | None = None, wait: bool = False,

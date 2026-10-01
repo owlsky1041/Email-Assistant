@@ -683,6 +683,46 @@ def cmd_settings_gui(args: argparse.Namespace) -> int:
         context.close()
 
 
+def cmd_main_gui(args: argparse.Namespace) -> int:
+    """内部命令：打开**主窗口**（状态面板 + 检索）。
+
+    与 ``_settings-gui`` 一样是独立子进程入口：托盘菜单跑在 pystray 线程里，
+    而 tkinter 只能在主线程创建窗口。
+    """
+    from .gui import window_available
+    from .gui.main_window import run_main_window
+
+    if not window_available():
+        print("ERROR: 当前环境没有图形界面", file=sys.stderr)
+        return 3
+
+    context = _load_context(args, quiet=True)
+    try:
+        return run_main_window(context, autosync=bool(getattr(args, "sync", False)))
+    finally:
+        context.close()
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    """打开程序主窗口；没有图形界面时给出明确指引而不是报错退出。"""
+    from .gui import window_available
+    from .gui.main_window import run_main_window
+
+    if not window_available():
+        warn("当前环境没有图形界面，主窗口不可用。")
+        info("命令行等价操作：")
+        info("  python main.py sync               # 同步")
+        info("  python main.py search \"关键字\"    # 检索")
+        info("  python main.py status             # 状态")
+        return 3
+
+    context = _load_context(args, quiet=True)
+    try:
+        return run_main_window(context, autosync=bool(getattr(args, "sync", False)))
+    finally:
+        context.close()
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
     """打开设置界面。
 
@@ -1101,6 +1141,14 @@ def build_parser() -> argparse.ArgumentParser:
     # 内部命令：在独立子进程中打开原生设置窗口（供托盘等后台线程调用）
     p_gui = sub.add_parser("_settings-gui", help=argparse.SUPPRESS)
     p_gui.set_defaults(func=cmd_settings_gui)
+
+    p_main = sub.add_parser("_main-gui", help=argparse.SUPPRESS)
+    p_main.add_argument("--sync", action="store_true", help=argparse.SUPPRESS)
+    p_main.set_defaults(func=cmd_main_gui)
+
+    p_app = sub.add_parser("app", help="打开程序主窗口（状态面板 + 检索）")
+    p_app.add_argument("--sync", action="store_true", help="打开后立刻同步一次")
+    p_app.set_defaults(func=cmd_app)
 
     p_settings = sub.add_parser("settings", help="打开设置界面（默认原生窗口）")
     p_settings.add_argument(

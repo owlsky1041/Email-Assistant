@@ -216,12 +216,16 @@ class TrayApplication:
 
         logger.info("托盘已启动，右键图标查看菜单")
 
-        # 首次运行引导：还没配邮箱或授权码时自动打开设置界面，
-        # 否则用户面对一个"什么都不做"的托盘图标会无从下手。
+        # 首次运行引导：还没配邮箱或授权码时，仍然先弹**设置窗口**
+        # （主窗口没有账号信息就只是个空壳，引导顺序反了）。
+        # 配好之后再打开主窗口就是自然的下一步。
         if self.needs_setup():
             logger.info("检测到尚未完成配置，自动打开设置界面")
             self._notify("请先完成邮箱配置")
             threading.Timer(3.0, self._action_open_settings).start()
+        else:
+            logger.info("配置就绪，打开主窗口")
+            threading.Timer(1.5, self._action_open_main).start()
 
         return self._run_tray()
 
@@ -245,7 +249,8 @@ class TrayApplication:
     def _run_tray(self) -> int:
         assert pystray is not None
         menu = pystray.Menu(
-            pystray.MenuItem("立即同步", self._action_sync, default=True),
+            pystray.MenuItem("打开主窗口", self._action_open_main, default=True),
+            pystray.MenuItem("立即同步", self._action_sync),
             pystray.MenuItem("设置…", self._action_open_settings),
             pystray.MenuItem("打开最新邮件", self._action_open_latest),
             pystray.MenuItem("打开归档目录", self._action_open_archive),
@@ -438,6 +443,27 @@ class TrayApplication:
 
     def settings_url(self) -> str:
         return f"http://{self.config.api.host}:{self.config.api.port}/setup"
+
+    def _action_open_main(self, *_args: Any) -> None:
+        """打开程序主窗口（状态面板 + 检索）。
+
+        托盘回调跑在 pystray 线程上，而 tkinter 只能在主线程创建窗口，
+        因此派生一个独立子进程。
+        """
+        import subprocess
+
+        from .gui import window_available
+        from .gui.main_window import main_window_command
+
+        if not window_available():
+            logger.warning("当前环境没有图形界面，无法打开主窗口")
+            self._notify("当前环境没有图形界面")
+            return
+        try:
+            subprocess.Popen(main_window_command(self._config_path()))
+        except OSError as exc:
+            logger.error("打开主窗口失败：%s", exc)
+            self._notify(f"打开主窗口失败：{exc}")
 
     def _action_open_settings(self, *_args: Any) -> None:
         """打开设置界面。

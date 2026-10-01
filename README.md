@@ -88,7 +88,26 @@ python main.py settings
 > `python main.py settings --browser` 仍可使用旧的网页设置页
 > （含同步进度面板、数据迁移等高级功能），无图形界面的服务器环境会自动回退到它。
 
-### 6. 开始使用
+### 6. 打开程序主窗口
+
+```bash
+python main.py app            # 加 --sync 则打开后立刻同步一次
+```
+
+原生窗口（tkinter，无需浏览器），分两块：
+
+| 区域 | 内容 |
+|---|---|
+| **同步状态** | 邮件总数 / 切片 / 向量 / 待索引；当前阶段与文件夹；进度条与 `已处理/总数`；**正在处理的邮件**（最近一封已归档或失败的主题）；速率、预计剩余、耗时；归档/跳过/失败/删除计数；立即同步、全量重扫、建立索引、打开归档目录、设置… |
+| **检索** | 关键字输入框（回车即搜）+ 条数选择；左侧结果表（主题/发件人/时间/分数）；右侧详情（收发件人、时间、文件夹、正文）；**附件列表**（文件名/大小/是否存在）与「打开附件 / 打开所在目录 / 打开归档 .md」 |
+
+打包版（Windows/Linux）配置完成后启动会自动打开这个窗口；
+也可以随时从**托盘右键 →「打开主窗口」**（托盘默认动作）打开。
+
+> 进度面板每 500ms 轮询一次同步状态，因此**不管同步是本窗口发起的、
+> 还是托盘/定时任务在后台跑起来的**，都能看到实时进度。
+
+### 7. 开始使用
 
 ```bash
 python main.py sync                 # 手动同步一次
@@ -180,6 +199,7 @@ sync:
 | `search "查询" [--mode hybrid\|keyword\|vector]` | 检索邮件 |
 | `index [--rebuild] [--limit N]` | 生成 / 重建切片与向量索引 |
 | `serve [--host H] [--port P]` | 启动知识库 API |
+| `app [--sync]` | 打开程序主窗口（状态面板 + 检索） |
 | `settings [--browser]` | 打开原生设置窗口（`--browser` 用网页设置页） |
 | `tray [--no-api]` | 托盘常驻 + 定时同步 + 通知 |
 | `backup [--db-only]` / `restore FILE` | 备份 / 恢复（默认含归档与附件） |
@@ -402,9 +422,11 @@ email-assistant/
 │   ├── models.py               # 领域模型
 │   ├── utils.py                # 文件名安全化 / 原子写入 / Token 估算
 │   ├── cleaner.py              # HTML 清洗 + 噪音过滤
-│   ├── gui/                    # 原生设置窗口（tkinter，零额外依赖）
+│   ├── gui/                    # 原生窗口（tkinter，零额外依赖）
+│   │   ├── main_model.py       #   状态面板格式化/检索/邮件详情（可无头测试）
+│   │   ├── main_window.py      #   主窗口：进度面板 + 检索 + 邮件详情
 │   │   ├── settings_model.py   #   草稿模型/校验/保存/连通性测试（可无头测试）
-│   │   └── settings_window.py  #   tkinter 窗口与子进程入口
+│   │   └── settings_window.py  #   设置窗口与子进程入口
 │   ├── mail_parser.py          # MIME 解析（中文头部 / RFC2231）
 │   ├── imap_client.py          # IMAP 封装（BODYSTRUCTURE 预检、分页、重连）
 │   ├── markdown_exporter.py    # Markdown + 附件落盘
