@@ -588,6 +588,42 @@ class TestRepoRootUsageConvention:
             + "\n  ".join(offenders)
         )
 
+    #: 允许用 config.PROJECT_ROOT 的场景：它表示"用户的数据根"，
+    #: 用来放配置文件、数据目录是**正确**的；只有用来定位**源码文件**才是错的。
+    SRC_ALLOWED_PATTERNS = (
+        "DEFAULT_CONFIG_PATH",   # 默认配置文件路径：本就该跟随用户目录
+        "config_file_path",
+    )
+
+    def test_src_does_not_use_config_project_root_for_source_files(self) -> None:
+        """src/ 里不得用 config.PROJECT_ROOT 定位源码文件。
+
+        回归：settings_service 曾用 PROJECT_ROOT / "main.py" 拼子进程命令，
+        而该值随 EMAIL_ASSISTANT_HOME 变化，导致设置了该变量的用户
+        "浏览…"目录选择框直接报 can't open file '<home>/main.py'。
+        """
+        offenders: list[str] = []
+        src_dir = self.REPO_ROOT / "src"
+        for path in sorted(src_dir.rglob("*.py")):
+            if path.name == "config.py":       # PROJECT_ROOT 的定义处
+                continue
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                stripped = line.strip()
+                if stripped.startswith("#") or "import" in stripped:
+                    continue
+                if "PROJECT_ROOT" not in stripped:
+                    continue
+                if any(ok in stripped for ok in self.SRC_ALLOWED_PATTERNS):
+                    continue
+                offenders.append(f"{path.relative_to(self.REPO_ROOT)}:{lineno}: {stripped}")
+        assert not offenders, (
+            "以下位置用可被 EMAIL_ASSISTANT_HOME 覆盖的 PROJECT_ROOT 定位源码文件；"
+            "请改用 Path(__file__).resolve().parent.parent（SOURCE_ROOT）：\n  "
+            + "\n  ".join(offenders)
+        )
+
     def test_allowlist_entries_still_exist(self) -> None:
         """例外清单里的文件必须真实存在，避免清单腐烂。"""
         tests_dir = self.REPO_ROOT / "tests"

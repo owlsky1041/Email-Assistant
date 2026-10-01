@@ -209,3 +209,179 @@ class TestDedupeParagraphs:
     def test_keeps_distinct(self) -> None:
         text = "甲\n\n乙\n\n丙"
         assert dedupe_paragraphs(text) == text
+
+
+class TestLayoutTableUnwrapping:
+    """HTML 邮件几乎都用嵌套表格排版，必须脱壳，否则正文全是 `| --- |`。
+
+    实测背景：某封真实邮件的切片 1022 字符里有 243 个 `|`，
+    全是排版脚手架，会严重稀释向量语义。
+    """
+
+    def test_single_cell_table_unwrapped(self) -> None:
+        html = "<table><tr><td>正文内容</td></tr></table>"
+        md = html_to_markdown(html)
+        assert "正文内容" in md
+        assert "|" not in md
+
+    def test_nested_layout_tables_unwrapped(self) -> None:
+        """多层嵌套的单格表格是典型邮件排版结构。"""
+        html = (
+            "<table><tr><td>"
+            "<table><tr><td>"
+            "<table><tr><td>深层内容</td></tr></table>"
+            "</td></tr></table>"
+            "</td></tr></table>"
+        )
+        md = html_to_markdown(html)
+        assert "深层内容" in md
+        assert "|" not in md
+
+    def test_th_alone_does_not_make_it_a_data_table(self) -> None:
+        """回归：邮件模板常拿 <th> 当排版单元格。
+
+        早期判据把"有 <th>"当作数据表标志，恰好保护住了最该拆的排版表。
+        """
+        html = (
+            "<table><tr><th></th><th></th></tr>"
+            "<tr><th>Welcome aboard 张三</th><th></th></tr></table>"
+        )
+        md = html_to_markdown(html)
+        assert "Welcome aboard 张三" in md
+        assert "|" not in md
+
+    def test_sparse_wide_table_unwrapped(self) -> None:
+        """宽但几乎全是空格的表格也是排版表。"""
+        html = (
+            "<table>"
+            "<tr><td></td><td></td><td></td><td></td><td></td></tr>"
+            "<tr><td></td><td>唯一内容</td><td></td><td></td><td></td></tr>"
+            "</table>"
+        )
+        md = html_to_markdown(html)
+        assert "唯一内容" in md
+        assert "|" not in md
+
+    def test_real_data_table_preserved(self) -> None:
+        """真实数据表必须保留表格结构 —— 不能为了去噪把有用信息也拆了。"""
+        html = (
+            "<table>"
+            "<tr><th>项目</th><th>数量</th><th>金额</th></tr>"
+            "<tr><td>螺栓</td><td>120</td><td>340.00</td></tr>"
+            "<tr><td>法兰</td><td>8</td><td>1200.00</td></tr>"
+            "</table>"
+        )
+        md = html_to_markdown(html)
+        assert "|" in md, "三列两行的真实数据表应当保留表格结构"
+        assert "螺栓" in md and "120" in md and "340.00" in md
+        assert "项目" in md and "金额" in md
+
+    def test_two_column_data_table_unwrapped(self) -> None:
+        """两列表格在邮件里基本都是排版，按判据脱壳。"""
+        html = (
+            "<table>"
+            "<tr><td>标签</td><td>值</td></tr>"
+            "<tr><td>姓名</td><td>张三</td></tr>"
+            "</table>"
+        )
+        md = html_to_markdown(html)
+        assert "标签" in md and "张三" in md
+        assert "|" not in md
+
+    def test_scaffolding_lines_removed_by_normalize(self) -> None:
+        """残留的纯脚手架行（只有 | 和 -）应被清掉。"""
+        from src.cleaner import normalize_markdown
+
+        raw = "正文\n\n|  |  |  |\n| --- | --- | --- |\n\n更多正文"
+        out = normalize_markdown(raw)
+        assert "---" not in out
+        assert "正文" in out and "更多正文" in out
+
+    def test_empty_table_removed(self) -> None:
+        md = html_to_markdown("<table><tr><td></td></tr></table><p>有内容</p>")
+        assert "有内容" in md
+        assert "|" not in md
+
+    def test_deeply_nested_terminates(self) -> None:
+        """异常深的结构不能导致死循环。"""
+        html = "<table><tr><td>" * 300 + "内层" + "</td></tr></table>" * 300
+        md = html_to_markdown(html)
+        assert "内层" in md
+
+
+class TestForwardedMailBodyRecovery:
+    """回归：转发邮件的正文曾被整个删光。
+
+    真实案例：一封转发邮件的 HTML 里，``**发件人：**值**发送时间：**值
+    ...**主题：**值正文`` 全部挤在**同一行**，最后一个字段（主题）的值
+    直接连着正文、没有分隔符。早期的规则"丢弃所有以 > 开头的块"
+    导致 615 字符正文被删成 0，归档结果只剩「(此邮件无正文内容)」。
+    """
+
+    SUBJECT = "转发: XCL-ED2-GYGC-178 宁波中金石化85000空分装置初步技术附件审查意见"
+
+    def _html(self) -> str:
+        return (
+            "<blockquote>"
+            "<div><b>发件人：</b> 柴平海</div>"
+            "<div><b>发送时间：</b> 2022-09-01 15:56</div>"
+            "<div><b>收件人：</b> 张海峰</div>"
+            "<div><b>主题：</b> XCL-ED2-GYGC-178 宁波中金石化85000空分装置初步技术附件审查意见"
+            "各位领导好，附件为审查意见，请查收。</div>"
+            "<div>宁波中金石化有限公司 轻烃事业部</div>"
+            "</blockquote>"
+        )
+
+    def test_body_recovered_from_single_line_metadata(self) -> None:
+        md, plain = compose_body("", self._html(), subject=self.SUBJECT)
+        assert "各位领导好" in plain, "转发邮件的实际正文不能丢"
+        assert "请查收" in plain
+        assert md.strip() != ""
+
+    def test_metadata_fields_removed(self) -> None:
+        _, plain = compose_body("", self._html(), subject=self.SUBJECT)
+        for field in ("发件人：", "发送时间：", "收件人："):
+            assert field not in plain, f"元数据字段 {field} 应当被剔除"
+
+    def test_subject_prefix_variants(self) -> None:
+        """正文里的主题值不带「转发:」前缀，必须能匹配上。"""
+        from src.cleaner import _cut_after_subject, _strip_reply_prefixes
+
+        assert _strip_reply_prefixes("转发: 测试") == "测试"
+        assert _strip_reply_prefixes("Re: Fwd: 测试") == "测试"
+        assert _strip_reply_prefixes("回复：测试") == "测试"
+        assert _strip_reply_prefixes("普通主题") == "普通主题"
+        assert _cut_after_subject("测试主题正文内容", "转发: 测试主题").startswith("正文内容")
+
+    def test_normal_email_unaffected(self) -> None:
+        """常规邮件不能因为安全阀而保留噪音。"""
+        html = (
+            "<p>正事如下：</p><p>请于本周五前反馈。</p>"
+            "<p>-- </p><p>张三 | 销售部</p>"
+        )
+        _, plain = compose_body("", html, subject="周会安排")
+        assert "请于本周五前反馈" in plain
+        assert "张三" not in plain, "签名仍应被剔除"
+
+    def test_safety_valve_keeps_content_when_over_filtered(self) -> None:
+        """通用安全阀：过滤把正文删到只剩零头时必须回退。"""
+        from src.cleaner import _body_mostly_lost
+
+        long_text = "这是一段足够长的正文内容。" * 10
+        assert _body_mostly_lost(long_text, "") is True
+        assert _body_mostly_lost(long_text, "短") is True
+        assert _body_mostly_lost(long_text, long_text) is False
+        # 短邮件不触发（本来就没什么可删）
+        assert _body_mostly_lost("短", "") is False
+
+    def test_plain_text_forward_also_recovers(self) -> None:
+        """纯文本形式的转发邮件同样要能恢复正文。"""
+        plain_src = (
+            "\n\n发件人： 柴平海\n发送时间： 2022-09-01 15:56\n"
+            "收件人： 张海峰\n主题： 某技术附件审查意见\n"
+            "各位领导好，附件为审查意见，请查收。\n"
+            "宁波中金石化有限公司 轻烃事业部\n"
+        )
+        md, plain = compose_body(plain_src, "", subject="转发: 某技术附件审查意见")
+        assert "各位领导好" in plain
+        assert "请查收" in plain

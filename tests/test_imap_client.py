@@ -20,8 +20,8 @@ from src.imap_client import (
 )
 
 
-class FakeUnderlyingMailbox:
-    """模拟 imaplib.IMAP4_SSL，只实现被 ImapClient 用到的部分。"""
+class FakeRawImap:
+    """模拟底层已认证的 ``imaplib.IMAP4``（imap-tools 挂在 ``.client`` 上）。"""
 
     def __init__(self, responses: dict[str, Any]) -> None:
         self.responses = responses
@@ -29,7 +29,6 @@ class FakeUnderlyingMailbox:
 
     def uid(self, command: str, *args: Any):  # type: ignore[no-untyped-def]
         self.calls.append((command, *args))
-        # 优先精确匹配 "FETCH:1,2"，其次匹配 "FETCH:..."，最后退到裸 "FETCH"
         exact = f"{command}:{args[1] if len(args) > 1 else ''}"
         if exact in self.responses:
             return self.responses[exact]
@@ -38,14 +37,32 @@ class FakeUnderlyingMailbox:
                 return value
         return self.responses.get(command, ("OK", []))
 
-    def folder(self):  # type: ignore[no-untyped-def]
-        return self
-
-    def set(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
     def noop(self):  # type: ignore[no-untyped-def]
         return ("OK", [b""])
+
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        return ("IMAP4REV1", "UIDPLUS")
+
+
+class FakeUnderlyingMailbox:
+    """模拟 ``imap_tools.MailBox``。
+
+    **刻意只暴露 ``client``，不直接暴露 ``uid`` / ``noop`` / ``capabilities``。**
+
+    这不是为了测试方便，而是为了让替身忠实反映真实结构：
+    ``imap-tools.MailBox`` 并不继承 ``IMAP4``，底层连接挂在实例属性
+    ``client`` 上。生产代码曾写成 ``self.mailbox.uid(...)`` —— 该属性不存在，
+    异常又被吞掉，导致大小预检与分部分拉取在真实服务器上**从未生效**，
+    所有邮件正文都成了占位符。严格分层后，一旦再写错就会立刻失败。
+    """
+
+    def __init__(self, responses: dict[str, Any]) -> None:
+        self.client = FakeRawImap(responses)
+
+    @property
+    def calls(self) -> list[tuple[Any, ...]]:
+        return self.client.calls
 
 
 @pytest.fixture
@@ -284,3 +301,82 @@ class TestFolderFiltering:
         assert FolderInfoLite("Drafts", flags=("\\Drafts",)).is_drafts
         assert FolderInfoLite("Junk", flags=("\\Junk",)).is_junk
         assert not FolderInfoLite("INBOX").is_drafts
+
+
+class TestRawClientContract:
+    """契约测试：底层命令必须走 ``mailbox.client``。
+
+    regression：生产代码曾写 ``self.mailbox.uid(...)``。imap-tools 的
+    ``MailBox`` 不继承 ``IMAP4``，该属性不存在，异常被 except 吞掉后
+    静默降级 —— 对真实邮箱表现为「所有邮件都被判定为超大附件、
+    正文全部变成占位符」，而单元测试因为替身同时暴露了 uid 而全绿。
+    """
+
+    def test_fake_mailbox_does_not_expose_raw_methods(self) -> None:
+        """替身本身必须保持严格，否则契约测试形同虚设。"""
+        mb = FakeUnderlyingMailbox({})
+        assert hasattr(mb, "client")
+        for attr in ("uid", "noop", "capabilities"):
+            assert not hasattr(mb, attr), (
+                f"替身不应直接暴露 {attr}；它属于 imap-tools 的 .client"
+            )
+
+    def test_fetch_sizes_uses_client(self, tmp_config) -> None:
+        from src.imap_client import ImapClient
+
+        c = ImapClient(tmp_config, "code")
+        c._current_folder = "INBOX"
+        c._mailbox = FakeUnderlyingMailbox({
+            "FETCH:1": ("OK", [(b"1 (UID 101 RFC822.SIZE 2048)", b"")]),
+        })
+        assert c.fetch_sizes(["1"], folder="INBOX") == {"101": 2048}
+        # 调用记录落在 client 上，证明走的是底层连接
+        assert c._mailbox.client.calls
+
+    def test_ping_and_capabilities_use_client(self, tmp_config) -> None:
+        from src.imap_client import ImapClient
+
+        c = ImapClient(tmp_config, "code")
+        c._mailbox = FakeUnderlyingMailbox({})
+        assert c.ping() is True
+        assert "IMAP4REV1" in c.capabilities()
+
+    def test_raw_property_returns_client(self, tmp_config) -> None:
+        from src.imap_client import ImapClient
+
+        c = ImapClient(tmp_config, "code")
+        fake = FakeUnderlyingMailbox({})
+        c._mailbox = fake
+        assert c.raw is fake.client
+
+    def test_programming_error_is_not_swallowed(self, tmp_config) -> None:
+        """AttributeError 属于代码缺陷，不能被 except 吞成"降级"。"""
+        from src.imap_client import ImapClient
+
+        class BrokenRaw:
+            @property
+            def uid(self):  # type: ignore[no-untyped-def]
+                raise AttributeError("模拟写错 API")
+
+        class BrokenMailbox:
+            client = BrokenRaw()
+
+        c = ImapClient(tmp_config, "code")
+        c._current_folder = "INBOX"
+        c._mailbox = BrokenMailbox()  # type: ignore[assignment]
+        with pytest.raises(AttributeError):
+            c.fetch_sizes(["1"], folder="INBOX")
+
+    def test_network_error_still_degrades(self, tmp_config) -> None:
+        """网络类错误仍应降级，不能因为上面的改动把容错也去掉了。"""
+        from src.imap_client import ImapClient
+
+        class FlakyRaw(FakeRawImap):
+            def uid(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                raise OSError("连接中断")
+
+        c = ImapClient(tmp_config, "code")
+        c._current_folder = "INBOX"
+        c._mailbox = FakeUnderlyingMailbox({})
+        c._mailbox.client = FlakyRaw({})
+        assert c.fetch_sizes(["1"], folder="INBOX") == {}

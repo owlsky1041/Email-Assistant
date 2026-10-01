@@ -25,6 +25,10 @@ from .secret_store import SecretStore, SecretStoreError
 
 logger = logging.getLogger(__name__)
 
+#: 源码树根（main.py 所在目录）。**不要**用 config.PROJECT_ROOT：
+#: 那个值会随 EMAIL_ASSISTANT_HOME 变化，用来定位源码文件必然出错。
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+
 #: 允许通过设置界面修改的字段白名单。
 #: 明确列出而不是"整份配置随便改"，避免界面误改到不该碰的项。
 EDITABLE_SECTIONS = (
@@ -290,7 +294,7 @@ class SettingsService:
         结果经临时文件回传，不依赖子进程的 stdout ——
         打包成窗口版 exe（``console=False``）时 stdout 可能不可用。
         """
-        from .config import PROJECT_ROOT, is_frozen
+        from .config import is_frozen
         from .tray_app import has_display
 
         if not has_display():
@@ -305,9 +309,12 @@ class SettingsService:
                     # 打包后 sys.executable 就是本程序，直接复用自身的子命令
                     cmd = [sys.executable, "_pick-directory", "--out", str(out_path)]
                 else:
+                    # 源码运行：main.py 在**源码树根**，不是 config.PROJECT_ROOT。
+                    # 后者会随 EMAIL_ASSISTANT_HOME 变化（受支持的用户配置），
+                    # 用它拼路径会让设置了该变量的用户永远找不到 main.py。
                     cmd = [
                         sys.executable,
-                        str(PROJECT_ROOT / "main.py"),
+                        str(SOURCE_ROOT / "main.py"),
                         "_pick-directory",
                         "--out",
                         str(out_path),

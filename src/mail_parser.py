@@ -332,7 +332,8 @@ class MailParser:
             if meta.content_id:
                 cid_map[meta.content_id] = f"attachments/{meta.filename}"
 
-        markdown, plain = compose_body(raw_plain, raw_html, cid_map)
+        markdown, plain = compose_body(raw_plain, raw_html, cid_map,
+                                       subject=result.subject)
         result.text_plain = raw_plain
         result.text_html = raw_html
         result.body_markdown = markdown

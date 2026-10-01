@@ -120,6 +120,9 @@ def clean_html(html: str, cid_map: dict[str, str] | None = None) -> str:
         if _is_tracking_pixel(tag):
             tag.decompose()
 
+    # 3.5) 排版表格脱壳
+    _unwrap_layout_tables(soup)
+
     # 4) 清理事件处理器与危险属性
     for tag in soup.find_all(True):
         for attr in list(tag.attrs):
@@ -150,6 +153,53 @@ def clean_html(html: str, cid_map: dict[str, str] | None = None) -> str:
                 continue
 
     return str(soup)
+
+
+def _unwrap_layout_tables(soup: Any) -> None:
+    """把**纯排版用途**的表格脱壳，只保留里面的文字。
+
+    HTML 邮件几乎都用嵌套表格排版（一层层单元格，每格一行字）。
+    直接转 Markdown 会变成满屏 ``| --- |``：实测某封真实邮件的切片
+    1022 个字符里有 243 个是 ``|``，这些脚手架会严重稀释向量语义。
+
+    **判据（基于真实邮件实测调整）**
+
+    只有同时满足下面三条才认定为"数据表"并保留表格结构：
+
+      * 最宽行 ≥ 3 列
+      * 至少 2 行
+      * 空格子占比 < 0.5
+
+    其余一律脱壳。特别注意**不能用 ``<th>`` 作为判据**：实测该邮件的
+    排版表几乎都带 ``<th>``（模板用它规避默认样式），按 ``<th>`` 判断
+    恰好会保护住最该拆的那批表。
+
+    从外到内反复处理：外层脱壳后内层仍在文档中，下一轮继续。
+    """
+    if soup is None:
+        return
+    for _ in range(200):  # 嵌套层数上限，防止异常结构导致死循环
+        target = None
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            cells = table.find_all(["td", "th"])
+            if not rows or not cells:
+                target = table
+                break
+            widest = max(
+                (len(tr.find_all(["td", "th"], recursive=False)) for tr in rows),
+                default=0,
+            )
+            empty_ratio = sum(1 for c in cells if not c.get_text(strip=True)) / len(cells)
+            is_data_table = widest >= 3 and len(rows) >= 2 and empty_ratio < 0.5
+            if not is_data_table:
+                target = table
+                break
+        if target is None:
+            return
+        for tag in target.find_all(["tr", "td", "th", "tbody", "thead", "tfoot"]):
+            tag.unwrap()
+        target.unwrap()
 
 
 def _clean_html_regex(html: str, cid_map: dict[str, str] | None) -> str:
@@ -239,6 +289,20 @@ def normalize_markdown(md: str) -> str:
     out = re.sub(r"\n{4,}", "\n\n\n", out)
     out = re.sub(r"!\[\]\(\s*\)", "", out)  # 去掉无地址的图片
     out = re.sub(r"\[\]\(\s*\)", "", out)  # 去掉无文本无地址的链接
+
+    # 丢掉"纯脚手架"表格行：一行里除了 | 和 - 之外没有任何文字。
+    # HTML 邮件的排版表格会残留大量这类行，它们不含任何语义，
+    # 却会占掉大段 token 并稀释向量。
+    kept: list[str] = []
+    for line in out.split("\n"):
+        stripped = line.strip()
+        if stripped and "|" in stripped and not re.search(r"[^\s|\-:]", stripped):
+            continue
+        kept.append(line)
+    out = "\n".join(kept)
+
+    # 压缩只剩分隔符的表格骨架：连续多个 `| | |` 之间没有内容时合并
+    out = re.sub(r"(?:\|[ \t]*)++(?=\n|$)", "|", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 
@@ -375,13 +439,119 @@ def strip_noise(text: str) -> str:
     return out.strip()
 
 
+#: 转发/回复头部的字段标记，形如 ``**发件人：**`` / ``**From:**``。
+#: 注意真实邮件里这些字段常常**全部挤在同一行**，其值与正文连在一起，
+#: 因此不能按行删除，必须逐个字段定位。
+_QUOTE_FIELD_MARK = re.compile(
+    r"\*\*\s*"
+    r"(发件人|发送时间|发送日期|收件人|抄送|密送|主题|日期|"
+    r"From|Sent|To|Cc|Bcc|Subject|Date)\s*[:：]\s*\*\*\s*",
+    re.IGNORECASE,
+)
+
+#: 纯文本形式的字段行（无 ``**`` 包裹）
+_QUOTE_META_LINE = re.compile(
+    r"^\s*>?\s*(?:\*\*)?\s*"
+    r"(发件人|发送时间|发送日期|收件人|抄送|密送|主题|日期|"
+    r"From|Sent|To|Cc|Bcc|Subject|Date)\s*[:：]",
+    re.IGNORECASE,
+)
+
+
+#: 转发/回复前缀，例如 ``转发:`` ``回复:`` ``Re:`` ``Fwd:``
+_REPLY_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:转发|回复|答复|回覆|转|回)\s*[:：]|(?:re|fwd?|fw|aw|sv)\s*[:：])\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_reply_prefixes(text: str) -> str:
+    """剥掉主题上的转发/回复前缀（可叠加，如 ``Re: Fwd: xxx``）。"""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _REPLY_PREFIX_RE.sub("", text).strip()
+    return text
+
+
+def _cut_after_subject(tail: str, subject: str) -> str:
+    """从 ``tail`` 中切掉主题值，返回其后的内容（即正文本体）。
+
+    正文里 ``主题：`` 的值通常**不带** ``转发:`` 前缀，而邮件头的 Subject
+    带前缀，所以要先剥离前缀再匹配；仍匹配不上时用主题尾部若干字符兜底定位。
+    """
+    if not tail or not subject:
+        return ""
+    bare = _strip_reply_prefixes(subject)
+    for candidate in (bare, subject):
+        if not candidate:
+            continue
+        idx = tail.find(candidate)
+        if idx >= 0:
+            return tail[idx + len(candidate):].strip()
+    # 兜底：主题可能被截断或含不可见字符，用尾部片段定位
+    for size in (30, 20, 12):
+        if len(bare) >= size:
+            idx = tail.find(bare[-size:])
+            if idx >= 0:
+                return tail[idx + size:].strip()
+    return ""
+
+
+def _strip_quote_meta_lines(md: str, subject: str = "") -> str:
+    """剔除转发头部的元数据字段，**保留其后的实际正文**。
+
+    用于"安全阀"：常规噪音过滤把正文删得所剩无几时退化为这种保守清理。
+
+    难点：真实邮件里 ``**发件人：**值**发送时间：**值...**主题：**值正文``
+    全部挤在一行，最后一个字段（主题）的值直接连着正文，没有分隔符。
+    这里用**邮件头里已知的主题**做锚点，精确切掉主题值，剩下的就是正文。
+    """
+    subject = (subject or "").strip()
+    out: list[str] = []
+    for line in md.split("\n"):
+        if _QUOTE_FIELD_MARK.search(line):
+            # re.split 带捕获组： [前缀, 字段名1, 值1, 字段名2, 值2, ..., 最后一个值]
+            parts = _QUOTE_FIELD_MARK.split(line)
+            prefix = parts[0]
+            tail = parts[-1] if len(parts) >= 3 else ""
+            line = f"{prefix} {_cut_after_subject(tail, subject)}".strip()
+        # 去掉引用前缀但保留内容
+        line = re.sub(r"^\s*>\s?", "", line)
+        out.append(line)
+    text = "\n".join(out)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return normalize_markdown(text)
+
+
+def _body_mostly_lost(original: str, cleaned: str) -> bool:
+    """判断噪音过滤是否"删过头"。
+
+    正文被删到只剩零头（或彻底为空）时，几乎一定是过滤规则误伤，
+    而不是真的全是签名/引用。此时宁可保留噪音，也不能丢内容。
+    """
+    src = (original or "").strip()
+    dst = (cleaned or "").strip()
+    if len(src) < 40:
+        return False          # 短邮件本来就没什么可删
+    if not dst:
+        return True
+    return len(dst) < max(30, len(src) * 0.25)
+
+
 def strip_noise_markdown(md: str) -> str:
     """Markdown 版噪音过滤：在纯文本规则之外，额外处理引用块。"""
     if not md:
         return ""
-    # Markdown 引用块 `> ...` 整块删除（历史回复）
+    # 引用块：只剔除"纯引用"的块（整块都是引用行），
+    # 不再简单丢弃所有以 > 开头的块 —— 转发邮件的正文常常整体在引用块里。
     blocks = re.split(r"\n\s*\n", md)
-    kept = [b for b in blocks if not b.lstrip().startswith(">")]
+    kept = []
+    for block in blocks:
+        lines = [ln for ln in block.split("\n") if ln.strip()]
+        if lines and all(ln.lstrip().startswith(">") for ln in lines):
+            continue
+        kept.append(block)
     return normalize_markdown(strip_noise("\n\n".join(kept)))
 
 
@@ -403,7 +573,10 @@ def dedupe_paragraphs(text: str) -> str:
 
 
 def compose_body(
-    text_plain: str, html: str, cid_map: dict[str, str] | None = None
+    text_plain: str,
+    html: str,
+    cid_map: dict[str, str] | None = None,
+    subject: str = "",
 ) -> tuple[str, str]:
     """生成 ``(markdown, plain_text)`` 正文对。
 
@@ -422,6 +595,17 @@ def compose_body(
     elif plain_source.strip():
         # 有 HTML 时，也检查 plain 是否包含 HTML 里没有的尾巴（少见），不做合并以免重复
         pass
+
+    # 安全阀：噪音过滤不得把正文删光。
+    # 转发邮件的正文常常整体位于引用块内，激进过滤会把它整封删掉。
+    candidate = html_to_markdown(html, cid_map) if (html and html.strip()) else ""
+    if not candidate.strip():
+        candidate = text_to_markdown_ish(text_plain or "")
+    if _body_mostly_lost(candidate, markdown):
+        salvaged = _strip_quote_meta_lines(candidate, subject)
+        if salvaged.strip():
+            logger.debug("噪音过滤删除过多内容，已退化为保守清理")
+            markdown = salvaged
 
     markdown = dedupe_paragraphs(normalize_markdown(markdown))
     plain = normalize_markdown(markdown)

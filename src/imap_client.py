@@ -380,6 +380,18 @@ class ImapClient:
             raise ImapConnectionError("IMAP 尚未连接")
         return self._mailbox
 
+    @property
+    def raw(self) -> imaplib.IMAP4:
+        """底层已认证的 ``imaplib`` 连接。
+
+        **注意**：``imap-tools.MailBox`` 并不继承 ``IMAP4``，它把连接放在
+        实例属性 ``client`` 上（因此 ``hasattr(MailBox, "client")`` 是 False，
+        只有实例才有）。直接写 ``mailbox.uid(...)`` / ``mailbox.noop()``
+        会抛 AttributeError —— 曾经因为异常被吞掉，导致大小预检与
+        分部分拉取在真实服务器上**从未生效**，所有邮件正文都成了占位符。
+        """
+        return self.mailbox.client  # type: ignore[return-value]
+
     def _reconnect(self) -> None:
         logger.warning("尝试重新建立 IMAP 连接…")
         self.disconnect()
@@ -472,7 +484,12 @@ class ImapClient:
         for batch in _chunks(list(uids), 200):
             self.cancel.raise_if_cancelled()
             try:
-                typ, data = self.mailbox.uid("FETCH", ",".join(batch), "(RFC822.SIZE)")
+                typ, data = self.mailbox.client.uid("FETCH", ",".join(batch), "(RFC822.SIZE)")
+            except (AttributeError, TypeError, NotImplementedError):
+                # 这类异常说明代码调错了 API，属于缺陷而非网络抖动，
+                # 必须直接暴露。此前 `mailbox.uid(...)` 写错属性却在这里被
+                # 静默吞掉，导致大小预检在真实服务器上从未生效。
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("获取邮件大小失败，将按整封下载：%s", exc)
                 continue
@@ -495,9 +512,11 @@ class ImapClient:
         if folder != self._current_folder:
             self.select_folder(folder)
         try:
-            typ, data = self.mailbox.uid("FETCH", uid, "(BODYSTRUCTURE)")
+            typ, data = self.mailbox.client.uid("FETCH", uid, "(BODYSTRUCTURE)")
+        except (AttributeError, TypeError, NotImplementedError):
+            raise
         except Exception as exc:  # noqa: BLE001
-            logger.debug("获取 BODYSTRUCTURE 失败（uid=%s）：%s", uid, exc)
+            logger.warning("获取 BODYSTRUCTURE 失败（uid=%s）：%s", uid, exc)
             return []
         if typ != "OK" or not data:
             return []
@@ -523,8 +542,12 @@ class ImapClient:
         plan.parts = parts
         plan.oversize_parts = [p for p in parts if p.size > self.max_attachment_bytes]
         if not parts:
-            # 拿不到结构时保守处理：仅在总大小可控时整封下载
-            plan.full_download = bool(size and size <= self.max_attachment_bytes)
+            # 拿不到结构时**整封下载**：宁可多花带宽，也不能让正文变成占位符。
+            # （此前这里返回 False，配合失效的预检，导致所有邮件都只取到头部。）
+            logger.warning(
+                "无法获取 uid=%s 的邮件结构，将整封下载以保证正文完整", uid
+            )
+            plan.full_download = True
             return plan
         plan.full_download = not plan.oversize_parts
         return plan
@@ -639,7 +662,9 @@ class ImapClient:
 
         self.cancel.raise_if_cancelled()
         try:
-            typ, data = self.mailbox.uid("FETCH", str(uid), command)
+            typ, data = self.mailbox.client.uid("FETCH", str(uid), command)
+        except (AttributeError, TypeError, NotImplementedError):
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("分部拉取失败（uid=%s）：%s", uid, exc)
             return []
@@ -690,14 +715,18 @@ class ImapClient:
 
     def ping(self) -> bool:
         try:
-            self.mailbox.noop()
+            self.mailbox.client.noop()
             return True
+        except (AttributeError, TypeError, NotImplementedError):
+            raise
         except Exception:  # noqa: BLE001
             return False
 
     def capabilities(self) -> list[str]:
         try:
-            return sorted(str(c) for c in self.mailbox.capabilities)
+            return sorted(str(c) for c in self.mailbox.client.capabilities)
+        except (AttributeError, TypeError, NotImplementedError):
+            raise
         except Exception:  # noqa: BLE001
             return []
 
