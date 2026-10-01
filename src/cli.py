@@ -655,8 +655,52 @@ def cmd_pick_directory(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_settings_gui(args: argparse.Namespace) -> int:
+    """内部命令：打开**原生**设置窗口。
+
+    这是一条独立子进程入口：调用方（托盘菜单、设置 API）跑在后台线程里，
+    而 tkinter 只能在主线程创建窗口。让子进程自己去开窗口最省事，
+    也顺带避免了两套线程模型互相干扰。
+    """
+    from .gui.settings_window import run_settings_window, window_available
+
+    if not window_available():
+        print("ERROR: 当前环境没有图形界面，请改用 `--browser` 模式", file=sys.stderr)
+        return 3
+
+    context = _load_context(args, quiet=True)
+    try:
+        # 还没配完邮箱/授权码时，授权码是必填项
+        from .config import resolve_auth_code
+
+        require_auth = not resolve_auth_code(context.config)
+        saved = run_settings_window(context.config, require_auth=require_auth)
+        return 0 if saved else 1
+    finally:
+        context.close()
+
+
 def cmd_settings(args: argparse.Namespace) -> int:
-    """打开可视化设置界面（启动本地服务后自动打开浏览器）。"""
+    """打开设置界面。
+
+    默认走**原生窗口**（tkinter），不弹浏览器、不需要敲命令。
+    ``--browser`` 可以退回旧的网页设置页。
+    """
+    if not args.browser:
+        from .gui.settings_window import run_settings_window, window_available
+
+        if window_available():
+            context = _load_context(args, quiet=True)
+            try:
+                from .config import resolve_auth_code
+
+                require_auth = not resolve_auth_code(context.config)
+                saved = run_settings_window(context.config, require_auth=require_auth)
+                return 0 if saved else 1
+            finally:
+                context.close()
+        warn("当前环境没有图形界面，自动改用浏览器模式")
+
     import threading
 
     from .cancellation import install_signal_handlers
@@ -984,9 +1028,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_pick.add_argument("--initial", default="", help=argparse.SUPPRESS)
     p_pick.set_defaults(func=cmd_pick_directory)
 
-    p_settings = sub.add_parser("settings", help="打开可视化设置界面")
-    p_settings.add_argument("--host", help="监听地址（默认取配置）")
-    p_settings.add_argument("--port", type=int, help="监听端口（默认 8990）")
+    # 内部命令：在独立子进程中打开原生设置窗口（供托盘等后台线程调用）
+    p_gui = sub.add_parser("_settings-gui", help=argparse.SUPPRESS)
+    p_gui.set_defaults(func=cmd_settings_gui)
+
+    p_settings = sub.add_parser("settings", help="打开设置界面（默认原生窗口）")
+    p_settings.add_argument(
+        "--browser", action="store_true", help="改用浏览器里的设置页面（旧界面）"
+    )
+    p_settings.add_argument("--host", help="浏览器模式的监听地址（默认取配置）")
+    p_settings.add_argument("--port", type=int, help="浏览器模式的监听端口（默认 8990）")
     p_settings.add_argument("--no-browser", action="store_true", help="只启动服务，不自动打开浏览器")
     p_settings.set_defaults(func=cmd_settings)
 

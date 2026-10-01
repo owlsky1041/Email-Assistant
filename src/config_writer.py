@@ -75,7 +75,11 @@ clean:
 
 embedding:
   backend: "auto"                      # auto | onnx | sentence-transformers | hashing
-  model: "BAAI/bge-small-zh-v1.5"
+  model: "BAAI/bge-small-zh-v1.5"          # sentence-transformers 用的仓库名
+  # 下载 ONNX 模型时**单独**用下面这个仓库：很多官方仓库并不提供 model.onnx
+  # （BAAI/bge-small-zh-v1.5 就没有），直接拿 model 去下载必然 404。
+  onnx_repo: "Xenova/bge-small-zh-v1.5"
+  onnx_endpoint: "https://hf-mirror.com"
   model_dir: "./data/models"           # onnx 后端的本地模型目录（需含 model.onnx + tokenizer.json）
   dimension: 512                       # hashing 兜底后端的维度
   chunk_size: 400                      # 目标切片 token 数（建议 300-500）

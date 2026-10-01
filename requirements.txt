@@ -8,6 +8,9 @@
 # ---- 配置与校验 ----
 PyYAML>=6.0.1
 pydantic>=2.5,<3
+# 保留 config.yaml 里的注释：设置界面保存时用 ruamel 做原地合并。
+# 缺了它不会崩，但用户手写的注释会被 safe_dump 抹掉。
+ruamel.yaml>=0.18
 
 # ---- IMAP 拉取（§11.2 严禁直接使用原生 imaplib） ----
 imap-tools>=1.2.0

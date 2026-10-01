@@ -177,6 +177,14 @@ class EmbeddingConfig(BaseModel):
     # auto | onnx | sentence-transformers | hashing
     backend: Literal["auto", "onnx", "sentence-transformers", "hashing"] = "auto"
     model: str = "BAAI/bge-small-zh-v1.5"
+    #: 下载 ONNX 模型时用的仓库，与 ``model`` 分开维护。
+    #: ``model`` 是 sentence-transformers 的仓库名，而**很多官方仓库并不提供
+    #: ONNX**（BAAI/bge-small-zh-v1.5 就是），拿它去下载必然 404。
+    #: 默认值是实测能下到 ``onnx/model.onnx`` 的社区导出；但社区导出的池化
+    #: 方式可能与官方不一致、检索区分度变差，生产环境建议用 `model import`
+    #: 导入本项目自带的模型。
+    onnx_repo: str = "Xenova/bge-small-zh-v1.5"
+    onnx_endpoint: str = "https://hf-mirror.com"
     model_dir: str = "./data/models"  # onnx 后端本地模型目录
     dimension: int = 512  # hashing 后端的维度
     chunk_size: int = 400  # token

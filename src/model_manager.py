@@ -195,6 +195,9 @@ def download_model(
     :param url: 直接下载地址（zip 或裸 model.onnx）。给了 zip 会自动解压。
     :param repo: HuggingFace 仓库名，例如 ``onnx-community/xxx-ONNX``。
     :param endpoint: 端点，国内建议 ``https://hf-mirror.com``。
+    :param variant: 仓库内 ONNX 文件的**相对路径**。可以写成
+        ``model.onnx``（默认，实际取仓库里的 ``onnx/model.onnx``），
+        也可以写成 ``onnx/model_quantized.onnx`` 这样带目录的完整路径。
     """
     dst = Path(target)
     dst.mkdir(parents=True, exist_ok=True)
@@ -206,7 +209,11 @@ def download_model(
         raise ModelError("必须提供 --url 或 --repo 之一")
 
     base = f"{endpoint.rstrip('/')}/{repo}/resolve/main/"
-    plan = [f"onnx/{variant}", "tokenizer.json", *OPTIONAL_FILES]
+    # variant 带目录时按「仓库内相对路径」处理，不再无条件加 onnx/ 前缀。
+    # 否则 `--variant onnx/model.onnx` 会被拼成 onnx/onnx/model.onnx。
+    onnx_path = variant if "/" in variant else f"onnx/{variant}"
+    plan = [onnx_path, "tokenizer.json", *OPTIONAL_FILES]
+    missing_required: list[str] = []
     for remote in plan:
         local = dst / Path(remote).name
         if local.exists() and not overwrite and local.stat().st_size > 0:
@@ -215,13 +222,28 @@ def download_model(
         try:
             _fetch(base + remote, local, on_progress)
         except urllib.error.HTTPError as exc:
-            if remote in OPTIONAL_FILES or exc.code == 404:
+            if remote in OPTIONAL_FILES:
                 logger.debug("可选文件不可用：%s（%s）", remote, exc.code)
+                continue
+            if exc.code == 404:
+                # 必需文件缺失必须显式记下来：静默 continue 会让调用方
+                # 最后只看到「下载完成但模型不可用」，完全定位不到原因。
+                missing_required.append(remote)
+                logger.warning("仓库中不存在必需文件：%s", remote)
                 continue
             raise ModelError(
                 f"下载失败 {remote}：HTTP {exc.code}。"
                 f"若在中国大陆，可加 --endpoint {MIRROR_ENDPOINT}"
             ) from exc
+
+    if missing_required:
+        raise ModelError(
+            f"仓库 {repo} 里没有这些必需文件：{'、'.join(missing_required)}。\n"
+            f"  · 该仓库可能只提供 PyTorch 权重，没有导出 ONNX；\n"
+            f"  · 换个带 ONNX 的仓库，或用 --variant 指定仓库内的实际路径\n"
+            f"    （例如 --variant onnx/model_quantized.onnx）；\n"
+            f"  · 也可以直接用 `model import <目录>` 导入本地已有的模型目录。"
+        )
 
     status = check_model_dir(dst)
     if status.ready and repo in COMMUNITY_REPOS.values():

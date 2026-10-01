@@ -67,18 +67,26 @@ python main.py doctor               # 环境与配置
 python main.py doctor --check-imap  # 顺便测试邮箱连通性
 ```
 
-### 5. 打开可视化设置界面
+### 5. 打开设置界面
 
 ```bash
 python main.py settings
 ```
 
-浏览器会自动打开 <http://127.0.0.1:8990/setup>，可以在界面里完成：
-邮箱账户与 IMAP、授权码、数据存放位置、同步策略与并发数、检索后端、
-本地服务端口、通知方式。
+弹出**原生设置窗口**（tkinter 实现，无需浏览器、无需敲命令），四个分页：
 
-打包版（Windows/macOS）也可以从**托盘右键 →「设置…」**打开；
-首次运行时若尚未配置邮箱，程序会自动弹出设置界面。
+| 分页 | 可配置项 |
+|---|---|
+| **邮箱接入** | 邮箱账号、IMAP 服务器、端口、SSL、**客户端授权码**、**测试连接**（只读验证并回显文件夹数与 INBOX 封数） |
+| **数据存放** | 数据根目录（含"浏览…"原生目录选择框）+ 各路径实时预览；归档、附件、数据库、向量库、备份、模型全部由这一个根目录派生 |
+| **同步** | 文件夹勾选（可从服务器拉取真实列表）、排除文件夹、同步间隔、并发下载连接数、分批大小、附件大小上限、单次封数上限、下载附件与删除比对开关 |
+| **检索模型** | 嵌入后端、模型状态、ONNX 仓库与下载源、一键下载（带进度条）或从本地目录导入 |
+
+打包版（Windows/Linux）双击启动后，若尚未配置邮箱，程序会**自动弹出这个原生窗口**；
+也可以随时从**托盘右键 →「设置…」**打开。
+
+> `python main.py settings --browser` 仍可使用旧的网页设置页
+> （含同步进度面板、数据迁移等高级功能），无图形界面的服务器环境会自动回退到它。
 
 ### 6. 开始使用
 
@@ -98,10 +106,10 @@ python scripts/seed_demo.py --reset
 
 ---
 
-## 可视化设置界面
+## 设置界面
 
-不需要改 YAML、也不需要记命令。`python main.py settings`（或托盘菜单「设置…」）
-会启动本地服务并打开设置页：
+不需要改 YAML、也不需要记命令。默认是**原生窗口**；加 `--browser` 才是下面的网页设置页
+（功能更全，但需要开浏览器）：
 
 | 分组 | 可配置项 |
 |---|---|
@@ -172,7 +180,7 @@ sync:
 | `search "查询" [--mode hybrid\|keyword\|vector]` | 检索邮件 |
 | `index [--rebuild] [--limit N]` | 生成 / 重建切片与向量索引 |
 | `serve [--host H] [--port P]` | 启动知识库 API |
-| `settings [--no-browser]` | 打开可视化设置界面 |
+| `settings [--browser]` | 打开原生设置窗口（`--browser` 用网页设置页） |
 | `tray [--no-api]` | 托盘常驻 + 定时同步 + 通知 |
 | `backup [--with-files]` / `restore FILE` | 备份 / 恢复 |
 | `rebuild-fts` | 重建全文索引 |
@@ -392,6 +400,9 @@ email-assistant/
 │   ├── models.py               # 领域模型
 │   ├── utils.py                # 文件名安全化 / 原子写入 / Token 估算
 │   ├── cleaner.py              # HTML 清洗 + 噪音过滤
+│   ├── gui/                    # 原生设置窗口（tkinter，零额外依赖）
+│   │   ├── settings_model.py   #   草稿模型/校验/保存/连通性测试（可无头测试）
+│   │   └── settings_window.py  #   tkinter 窗口与子进程入口
 │   ├── mail_parser.py          # MIME 解析（中文头部 / RFC2231）
 │   ├── imap_client.py          # IMAP 封装（BODYSTRUCTURE 预检、分页、重连）
 │   ├── markdown_exporter.py    # Markdown + 附件落盘

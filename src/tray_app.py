@@ -385,7 +385,27 @@ class TrayApplication:
         return f"http://{self.config.api.host}:{self.config.api.port}/setup"
 
     def _action_open_settings(self, *_args: Any) -> None:
-        """打开设置界面；API 子进程没起来就临时拉一个。"""
+        """打开设置界面。
+
+        默认弹**原生窗口**，不再把用户丢到浏览器里填表。托盘回调跑在
+        pystray 的线程上，而 tkinter 只能在主线程创建窗口，因此这里
+        fork 一个独立子进程去开窗口。子进程退出后重新加载配置，
+        这样刚改的设置立刻生效，不用重启托盘。
+        """
+        from .gui.settings_window import open_window_process, window_available
+
+        if window_available():
+            self._notify("正在打开设置…")
+
+            def _open() -> None:
+                open_window_process(config_path=self._config_path(), wait=True)
+                self._reload_config()
+
+            threading.Thread(target=_open, name="settings-window", daemon=True).start()
+            return
+
+        # 没有图形界面：退回浏览器模式（服务器 / 纯命令行场景）
+        logger.info("当前环境没有图形界面，改用浏览器设置页")
         if self._api_process is None:
             self.start_api_process()
             # 给 uvicorn 一点启动时间，否则浏览器会看到"拒绝连接"
@@ -393,6 +413,49 @@ class TrayApplication:
             self._notify("正在启动设置界面…")
             return
         open_url(self.settings_url())
+
+    def _config_path(self) -> str | None:
+        """当前实际加载的配置文件路径（设置窗口必须写回同一个文件）。"""
+        source = getattr(self.config, "source_path", None)
+        return str(source) if source else None
+
+    def _reload_config(self) -> None:
+        """设置窗口关闭后重新读配置。
+
+        只重载"安全"的部分：账号、授权码、同步参数、清洗策略。
+        **数据目录/数据库路径不热切换** —— 正在跑的 DB 连接和向量库句柄
+        都指向老路径，中途换掉会写坏数据。这种情况下如实告诉用户要重启，
+        而不是假装已经生效。
+        """
+        from .config import load_config
+
+        old = self.config
+        try:
+            new = load_config(old.source_path)
+        except Exception as exc:  # noqa: BLE001 - 配置读坏了不该把托盘弄挂
+            logger.exception("重新加载配置失败")
+            self._notify(f"配置读取失败：{exc}")
+            return
+
+        moved = [
+            label
+            for label, before, after in (
+                ("数据目录", old.archive_path, new.archive_path),
+                ("数据库", old.sqlite_file, new.sqlite_file),
+            )
+            if before != after
+        ]
+
+        self.config = new
+        self.context.config = new
+        self.scheduler.config = new
+
+        if moved:
+            logger.warning("检测到 %s 变化，需要重启才能生效", "、".join(moved))
+            self._notify(f"{'、'.join(moved)}已变更，请重启程序后生效")
+        else:
+            logger.info("配置已重新加载")
+            self._notify("配置已更新")
 
     def needs_setup(self) -> bool:
         """是否需要引导用户完成首次配置。"""
