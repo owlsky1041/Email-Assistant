@@ -46,6 +46,11 @@ def tmp_config(tmp_path: Path) -> AppConfig:
                 "sqlite_path": str(tmp_path / "mail.db"),
                 "chroma_dir": str(tmp_path / "chroma"),
                 "backup_dir": str(tmp_path / "backups"),
+                # blob 仓库必须也落在 tmp_path 内：否则会写进项目的真实
+                # data/ 目录污染工作区，而且 tmp_path（tmpfs）与项目目录
+                # （另一个文件系统）跨卷会让硬链接退化成复制，
+                # 测试就测不到真正的去重行为。
+                "blob_dir": str(tmp_path / "blobs"),
                 "per_account_subdir": True,
             },
             "log": {"dir": str(tmp_path / "logs"), "console": False, "level": "WARNING"},

@@ -291,6 +291,7 @@ class SettingsWindow:
             ("数据库", "sqlite_path"),
             ("向量库", "chroma_dir"),
             ("备份", "backup_dir"),
+            ("附件内容仓库", "blob_dir"),
             ("嵌入模型", "model_dir"),
         ]
         self.layout_text.configure(state="normal")

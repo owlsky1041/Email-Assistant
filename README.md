@@ -183,6 +183,8 @@ sync:
 | `settings [--browser]` | 打开原生设置窗口（`--browser` 用网页设置页） |
 | `tray [--no-api]` | 托盘常驻 + 定时同步 + 通知 |
 | `backup [--db-only]` / `restore FILE` | 备份 / 恢复（默认含归档与附件） |
+| `migrate-blobs [--relink]` | 为已有归档补建内容寻址仓库（只增不删，可重复执行） |
+| `verify-blobs [--repair]` | 校验归档完整性；`--repair` 可从 blob 重建被误删的附件 |
 | `rebuild-fts` | 重建全文索引 |
 | `config [--show]` | 查看配置 |
 | `demo [--count N] [--reset]` | 生成演示数据（无需真实邮箱） |
@@ -486,6 +488,9 @@ email-assistant/
 | 附件内容去重 | 按 sha256 复用同一份内容：优先硬链接（NTFS/ext4 免管理员），跨卷退化为复制。并发下载时按内容哈希串行化，避免两个工作线程同时查重双双落空 |
 | 附件占位原子化 | `claim_path()` 用 `O_CREAT\|O_EXCL` 排他占名，并发同名附件不会互相覆盖；`ChunkedFileWriter` 的临时文件名带 pid+线程+uuid，不会再撞车 |
 | 向量检索加速 | 有 numpy 时把缓存拼成 `(N, dim)` 矩阵一次矩阵乘算完（实测 5 万切片 1.07s → 3ms，约 360×）；没装 numpy 自动回退纯 Python，结果完全一致 |
+| 附件内容寻址 | `blobs/<sha前2>/<sha次2>/<sha256>` 是权威副本，人工目录里是它的硬链接；同一内容只占一个 inode，可校验、可重建 |
+| 归档自检 | `verify-blobs` 校验"数据库说有、磁盘上有没有"以及内容是否被改动（后者单看数据库永远发现不了）；`--repair` 从 blob 原子恢复 |
+| 便携数据根 | 打包产物若所在目录不可写（典型：装进 `C:\Program Files`），自动退回用户数据目录，不会出现"第一次保存设置就权限拒绝" |
 
 ---
 

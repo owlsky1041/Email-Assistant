@@ -194,6 +194,7 @@ class TestOnnxIntegration:
                     "sqlite_path": str(tmp_path / "m.db"),
                     "chroma_dir": str(tmp_path / "c"),
                     "backup_dir": str(tmp_path / "b"),
+                    "blob_dir": str(tmp_path / "blobs"),
                     "attachment_dir": str(tmp_path / "at"),
                 },
                 "log": {"dir": str(tmp_path / "l"), "console": False, "level": "ERROR"},

@@ -27,6 +27,38 @@ def is_frozen() -> bool:
 APP_DIR_NAME = "EmailAssistant"
 
 
+def _is_writable(directory: Path) -> bool:
+    """目录能不能真的写文件。
+
+    ``os.access(W_OK)`` 在 Windows 上对目录不可靠（只读属性和 ACL 是两回事），
+    因此这里实打实地建一个临时文件再删掉。
+    """
+    probe = directory / f".write-probe-{os.getpid()}"
+    try:
+        probe.write_text("", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _user_data_root() -> Path:
+    """当前平台的「用户数据目录」基准。"""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+        return root / APP_DIR_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / APP_DIR_NAME
+
+
 def runtime_root() -> Path:
     """应用根目录（配置 / data / logs 的基准）。
 
@@ -35,8 +67,11 @@ def runtime_root() -> Path:
     1. 环境变量 ``EMAIL_ASSISTANT_HOME``（显式指定，便于绿色版/多实例）
     2. **macOS 应用包内** —— 用 ``~/Library/Application Support/EmailAssistant``。
        包体在签名后只读，且升级时整包替换，绝不能把用户数据放进去。
-    3. **其它打包产物** —— 可执行文件所在目录（绿色免安装，符合 Windows 习惯）
-    4. **源码运行** —— 项目根
+    3. **可写的打包产物目录** —— 绿色免安装，配置和数据就在程序旁边
+    4. **不可写的打包产物目录**（典型：装进 ``C:\\Program Files``）——
+       退回用户数据目录。安装包是以管理员身份装进去的，普通用户运行时
+       没有写权限；若仍往程序目录写配置，第一次「保存设置」就会失败。
+    5. **源码运行** —— 项目根
 
     打包场景必须与 ``__file__`` 脱钩：PyInstaller 把模块放进 ``_internal/``，
     按 ``__file__`` 推导会把用户的配置和数据埋进包体内部。
@@ -53,7 +88,11 @@ def runtime_root() -> Path:
             base = Path.home() / "Library" / "Application Support" / APP_DIR_NAME
             base.mkdir(parents=True, exist_ok=True)
             return base
-        return exe_dir
+        if _is_writable(exe_dir):
+            return exe_dir
+        fallback = _user_data_root()
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
     return Path(__file__).resolve().parent.parent
 
@@ -96,6 +135,11 @@ class StorageConfig(BaseModel):
     sqlite_path: str = "./data/sqlite/mail.db"
     chroma_dir: str = "./data/chromadb"
     backup_dir: str = "./data/backups"
+    #: 内容寻址的附件仓库：``blobs/<sha前2>/<sha次2>/<sha256>``。
+    #: 人工可读的归档目录里放的是它的硬链接（跨卷时退化为复制）。
+    #: 这是**可重建的派生数据** —— 归档目录本身已经含全部内容，
+    #: 因此备份不需要带上它，`migrate-blobs` 随时能从归档重建。
+    blob_dir: str = "./data/blobs"
     # sibling: 附件放在邮件同级 attachments/ 子目录（计划书 3.2 默认）
     # global:  附件统一放在 storage.attachment_dir/<账号>/<文件夹>/
     attachment_layout: Literal["sibling", "global"] = "sibling"
@@ -331,6 +375,10 @@ class AppConfig(BaseModel):
         return self.resolve(self.storage.backup_dir)
 
     @property
+    def blob_path(self) -> Path:
+        return self.resolve(self.storage.blob_dir)
+
+    @property
     def log_path(self) -> Path:
         return self.resolve(self.log.dir)
 
@@ -353,6 +401,7 @@ class AppConfig(BaseModel):
             self.sqlite_file.parent,
             self.chroma_path,
             self.backup_path,
+            self.blob_path,
             self.log_path,
             self.model_path,
         ):

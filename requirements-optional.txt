@@ -28,4 +28,7 @@ numpy>=1.26
 # torch>=2.2
 
 # ---- sqlite-vec：SQLite 原生向量扩展（可选加速） ----
-# sqlite-vec>=0.1.0
+# 不装也能跑：暴力检索会用 numpy 矩阵乘加速（实测 5 万切片 3ms/次）。
+# 但若把 vector.backend 显式写成 sqlite-vec 而这里没装，程序会**明确告警**
+# 而不是静默降级。
+sqlite-vec>=0.1.0

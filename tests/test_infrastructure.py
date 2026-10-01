@@ -651,6 +651,92 @@ class TestRepoRootUsageConvention:
         "config_file_path",
     )
 
+    def test_x11_tray_host_detection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Plasma 6 / GNOME 只提供 StatusNotifierItem，XEmbed 托盘不存在。
+
+        回归：此时 pystray 会在自己的后台线程里抛 AssertionError，
+        异常传不回 icon.run()，进程活着但图标永远不出现。
+        """
+        from src import tray_app
+
+        monkeypatch.setattr(tray_app.sys, "platform", "linux")
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        assert tray_app.x11_tray_host_available() is False
+
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        assert tray_app.x11_tray_host_available() is None
+
+        monkeypatch.setattr(tray_app.sys, "platform", "win32")
+        assert tray_app.x11_tray_host_available() is None
+
+    def test_tray_host_check_is_permissive_when_unknown(self) -> None:
+        """判断不了时必须放行，不能因为探测失败就把托盘功能关掉。"""
+        from src.tray_app import TrayApplication
+
+        class _Stub(TrayApplication):
+            def __init__(self) -> None:  # noqa: D107 - 只测这一个方法
+                pass
+
+        import src.tray_app as tray_module
+
+        original = tray_module.x11_tray_host_available
+        try:
+            tray_module.x11_tray_host_available = lambda: None  # type: ignore[assignment]
+            assert _Stub()._tray_host_ready() is True
+            tray_module.x11_tray_host_available = lambda: False  # type: ignore[assignment]
+            assert _Stub()._tray_host_ready() is False
+        finally:
+            tray_module.x11_tray_host_available = original  # type: ignore[assignment]
+
+    def test_frozen_root_falls_back_when_exe_dir_not_writable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """回归：装进 Program Files 时不能往程序目录写配置。
+
+        安装包以管理员身份装到 ``{autopf}``，普通用户运行时没有写权限；
+        若 runtime_root 仍返回 exe 目录，第一次「保存设置」就会
+        权限拒绝。此时必须退到用户数据目录。
+        """
+        import src.config as config_module
+
+        ro = tmp_path / "program-files"
+        ro.mkdir()
+        monkeypatch.delenv("EMAIL_ASSISTANT_HOME", raising=False)
+        monkeypatch.setattr(config_module, "is_frozen", lambda: True)
+        monkeypatch.setattr(config_module.sys, "executable", str(ro / "app"))
+        # 直接桩掉可写性探测：用 chmod 造只读目录在 root 下无效
+        # （root 无视权限位），会把这条测试变成环境依赖
+        monkeypatch.setattr(config_module, "_is_writable", lambda _d: False)
+        monkeypatch.setattr(
+            config_module, "_user_data_root", lambda: tmp_path / "userdata"
+        )
+        assert config_module.runtime_root() == (tmp_path / "userdata").resolve()
+
+    def test_frozen_root_keeps_portable_behaviour_when_writable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """可写时保持绿色版语义：配置和数据就在程序旁边。"""
+        import src.config as config_module
+
+        portable = tmp_path / "portable"
+        portable.mkdir()
+        monkeypatch.delenv("EMAIL_ASSISTANT_HOME", raising=False)
+        monkeypatch.setattr(config_module, "is_frozen", lambda: True)
+        monkeypatch.setattr(config_module.sys, "executable", str(portable / "app"))
+        monkeypatch.setattr(config_module, "_is_writable", lambda _d: True)
+        assert config_module.runtime_root() == portable.resolve()
+
+    def test_home_override_beats_everything(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import src.config as config_module
+
+        target = tmp_path / "custom"
+        monkeypatch.setenv("EMAIL_ASSISTANT_HOME", str(target))
+        monkeypatch.setattr(config_module, "is_frozen", lambda: True)
+        assert config_module.runtime_root() == target.resolve()
+
     def test_src_does_not_use_config_project_root_for_source_files(self) -> None:
         """src/ 里不得用 config.PROJECT_ROOT 定位源码文件。
 

@@ -36,6 +36,9 @@ LAYOUT: dict[str, str] = {
     "sqlite_path": "sqlite/mail.db",
     "chroma_dir": "chromadb",
     "backup_dir": "backups",
+    # 漏掉它会让界面上改数据根目录后，blob 仓库仍指回默认的 ./data/blobs
+    # （相对项目目录），内容散落到两个地方。
+    "blob_dir": "blobs",
 }
 
 #: 派生路径里不带 ``data/`` 前缀的两项（沿用既有默认位置）
@@ -100,6 +103,7 @@ def detect_data_root(config: AppConfig) -> tuple[str, list[str]]:
         "sqlite_path": config.sqlite_file,
         "chroma_dir": config.chroma_path,
         "backup_dir": config.backup_path,
+        "blob_dir": config.blob_path,
         "model_dir": config.model_path,
     }
     root = config.archive_path.parent
@@ -247,6 +251,7 @@ class SettingsDraft:
                 "sqlite_path": paths["sqlite_path"],
                 "chroma_dir": paths["chroma_dir"],
                 "backup_dir": paths["backup_dir"],
+                "blob_dir": paths["blob_dir"],
             },
             "sync": {
                 "folders": list(self.folders),

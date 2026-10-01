@@ -50,6 +50,8 @@ storage:
   sqlite_path: "./data/sqlite/mail.db"
   chroma_dir: "./data/chromadb"
   backup_dir: "./data/backups"
+  # 内容寻址的附件仓库（可重建的派生数据，备份不必包含）
+  blob_dir: "./data/blobs"
   attachment_layout: "sibling"         # sibling=邮件同级 attachments/ ; global=统一目录
   per_account_subdir: true             # 归档目录下按账号分层（多账号预留）
 

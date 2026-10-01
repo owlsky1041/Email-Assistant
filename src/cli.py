@@ -801,6 +801,55 @@ def cmd_restore(args: argparse.Namespace) -> int:
         context.close()
 
 
+def cmd_migrate_blobs(args: argparse.Namespace) -> int:
+    """给已有归档补建内容寻址仓库（只增不删，可重复执行）。"""
+    from .blob_maintenance import migrate_blobs
+
+    context = _load_context(args)
+    try:
+        info("正在把已有附件补建进 blob 仓库（不会移动或删除任何原文件）…")
+        stats = migrate_blobs(
+            context.config, context.db, limit=args.limit, relink=args.relink
+        )
+        ok(stats.describe())
+        if stats.errors:
+            warn("部分条目需要注意：")
+            for line in stats.errors:
+                warn(f"  · {line}")
+        if stats.missing:
+            warn(
+                "缺失的文件无法从数据库恢复（库里只有路径与 sha256）。"
+                "如果之前备份过归档，请先解压回原位置再重跑本命令。"
+            )
+        return 0 if not stats.failed else 1
+    finally:
+        context.close()
+
+
+def cmd_verify_blobs(args: argparse.Namespace) -> int:
+    """校验归档完整性，可选就地修复。"""
+    from .blob_maintenance import verify_blobs
+
+    context = _load_context(args)
+    try:
+        info("正在校验归档与 blob 仓库" + ("（逐字节重算哈希，可能较慢）" if not args.quick else "…"))
+        stats = verify_blobs(
+            context.config,
+            context.db,
+            deep=not args.quick,
+            repair=args.repair,
+            limit=args.limit,
+        )
+        (ok if stats.healthy else warn)(stats.describe())
+        for line in stats.errors:
+            warn(f"  · {line}")
+        if not stats.healthy and not args.repair:
+            info("提示：加 --repair 可从 blob 重建缺失的归档文件")
+        return 0 if stats.healthy else 1
+    finally:
+        context.close()
+
+
 def cmd_rebuild_fts(args: argparse.Namespace) -> int:
     context = _load_context(args)
     try:
@@ -1082,6 +1131,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_restore.add_argument("backup_file", help="备份文件路径")
     p_restore.add_argument("--yes", "-y", action="store_true")
     p_restore.set_defaults(func=cmd_restore)
+
+    p_mig = sub.add_parser(
+        "migrate-blobs", help="为已有归档补建内容寻址仓库（blobs）"
+    )
+    p_mig.add_argument("--limit", type=int, default=0, help="只处理前 N 条（0=全部）")
+    p_mig.add_argument(
+        "--relink",
+        action="store_true",
+        help="把内容相同但仍各占一份 inode 的附件合并为硬链接（原子替换，先校验内容）",
+    )
+    p_mig.set_defaults(func=cmd_migrate_blobs)
+
+    p_ver = sub.add_parser("verify-blobs", help="校验归档完整性（可 --repair）")
+    p_ver.add_argument("--quick", action="store_true", help="只查文件是否存在，不重算哈希")
+    p_ver.add_argument("--repair", action="store_true", help="从 blob 重建缺失的归档文件")
+    p_ver.add_argument("--limit", type=int, default=0, help="只校验前 N 条（0=全部）")
+    p_ver.set_defaults(func=cmd_verify_blobs)
 
     p_fts = sub.add_parser("rebuild-fts", help="重建全文索引")
     p_fts.set_defaults(func=cmd_rebuild_fts)

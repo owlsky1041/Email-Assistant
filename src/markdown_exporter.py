@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 import yaml
 
+from .blob_store import BlobStore
 from .cleaner import compose_body
 from .config import AppConfig
 from .models import AttachmentMeta, ParsedMessage
@@ -63,6 +64,7 @@ class MarkdownExporter:
         config: AppConfig,
         *,
         blob_lookup: "Callable[[str], Path | None] | None" = None,
+        blob_store: "BlobStore | None" = None,
     ) -> None:
         self.config = config
         self.root = config.archive_path
@@ -73,6 +75,9 @@ class MarkdownExporter:
         #: ``sha256 -> 已落盘文件路径``。同一个文件（内联签名图、被反复转发的
         #: 技术附件）会在几十封邮件里重复出现，没必要把内容重复写几十遍。
         self._blob_lookup = blob_lookup
+        #: 内容寻址仓库。有它时附件先写成 blob，再硬链接到人工目录，
+        #: 这样同一份内容有唯一的权威位置，可校验、可重建。
+        self.blob_store = blob_store
         #: 本次运行内已写出的内容索引。**不能只依赖数据库**：并发下载时
         #: 多个工作线程同时归档，A 的附件记录要等 A 整封入库后才可见，
         #: 并行的 B 查库必然查不到，去重就形同虚设。
@@ -202,6 +207,16 @@ class MarkdownExporter:
                 meta.filename, max_bytes=120, fallback=f"attachment_{meta.part_index}"
             )
 
+            # 先落到内容寻址仓库：它才是权威副本，人工目录里的那份是硬链接。
+            # 这样即使人工目录被误删，内容也还在，能一条命令重建。
+            blob_path: Path | None = None
+            if self.blob_store is not None:
+                try:
+                    blob_path = self.blob_store.put_bytes(payload, digest=digest)
+                except (OSError, ValueError) as exc:
+                    logger.warning("写入 blob 失败，改为直接落盘：%s", exc)
+                    blob_path = None
+
             # 同一份内容**串行处理**。并发下载时两个工作线程几乎同时到达，
             # 都在对方写盘之前查重、双双落空，去重就白做了 —— 尤其是那些
             # 每封邮件都带一份的内联签名图。按内容哈希加锁只序列化真正
@@ -299,8 +314,12 @@ class MarkdownExporter:
     def _find_source(self, digest: str) -> Path | None:
         """按优先级找一份可复用的同内容文件。
 
-        先看本次运行内写出的（并发下唯一可靠的来源），再查库（跨运行复用）。
+        顺序：blob 仓库（权威且稳定）→ 本次运行内写出的（并发下唯一可靠的
+        来源）→ 查库（跨运行复用）。
         """
+        if self.blob_store is not None and self.blob_store.has(digest):
+            return self.blob_store.path_for(digest)
+
         with self._written_lock:
             known = self._written.get(digest)
         if known is not None and known.is_file():

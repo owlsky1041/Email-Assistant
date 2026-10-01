@@ -16,9 +16,21 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-VERSION="$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/__init__.py').read_text(encoding='utf-8')).group(1))" 2>/dev/null || echo "0.0.0")"
 ARCH="$(uname -m)"
 PY="${PYTHON:-python3}"
+
+# 用 $PY 而不是裸 python：调用方可能只把解释器放在 venv 里（未激活时
+# 裸 python 根本不存在），那样版本号会静默变成 0.0.0，产物名跟着错。
+VERSION="$("$PY" -c "import re,pathlib;m=re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/__init__.py').read_text(encoding='utf-8'));print(m.group(1) if m else '')" 2>/dev/null)"
+if [ -z "$VERSION" ]; then
+  echo "!! 无法从 src/__init__.py 读取版本号，拒绝用 0.0.0 命名产物。"
+  echo "   请确认 $PY 可用，或手动设置 VERSION 环境变量。"
+  VERSION="${VERSION_OVERRIDE:-}"
+fi
+if [ -z "$VERSION" ]; then
+  echo "!! 版本号为空，构建中止（产物名会误导用户）"
+  exit 1
+fi
 
 echo "==> 构建 Linux 发行包 v${VERSION} (${ARCH})"
 

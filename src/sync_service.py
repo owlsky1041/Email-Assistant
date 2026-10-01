@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .cancellation import CancellationToken, CancelledError, get_cancellation_token
+from .blob_store import BlobStore
 from .cleaner import CleanPolicy
 from .config import AppConfig
 from .database import Database
@@ -68,7 +69,12 @@ class SyncService:
         self.cancel = cancel_token or get_cancellation_token()
         self.on_progress = on_progress
         self.account = config.email.address
-        self.exporter = MarkdownExporter(config, blob_lookup=self._lookup_attachment_blob)
+        self.blob_store = BlobStore(config.blob_path, mode=config.storage.file_mode)
+        self.exporter = MarkdownExporter(
+            config,
+            blob_lookup=self._lookup_attachment_blob,
+            blob_store=self.blob_store,
+        )
         self.parser = MailParser(
             max_attachment_bytes=int(config.sync.max_attachment_size_mb * 1024 * 1024),
             download_attachments=config.sync.download_attachments,

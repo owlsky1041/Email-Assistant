@@ -36,6 +36,7 @@ class TestLayout:
         assert paths["sqlite_path"] == "/srv/mail/sqlite/mail.db"
         assert paths["chroma_dir"] == "/srv/mail/chromadb"
         assert paths["backup_dir"] == "/srv/mail/backups"
+        assert paths["blob_dir"] == "/srv/mail/blobs"
         assert paths["model_dir"] == "/srv/mail/models"
 
     def test_relative_root_stays_relative(self) -> None:
@@ -68,6 +69,7 @@ class TestDetectRoot:
         cfg.storage.sqlite_path = str(root / "sqlite" / "mail.db")
         cfg.storage.chroma_dir = str(root / "chromadb")
         cfg.storage.backup_dir = str(root / "backups")
+        cfg.storage.blob_dir = str(root / "blobs")
         cfg.embedding.model_dir = str(root / "models")
         _, mismatches = detect_data_root(cfg)
         assert mismatches == []

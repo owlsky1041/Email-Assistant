@@ -226,7 +226,11 @@ class SqliteVectorStore(VectorStore):
     ) -> None:
         self.db = database
         self.model = model
-        self.backend = "sqlite-vec" if use_sqlite_vec else "sqlite-bruteforce"
+        #: 配置里**要求**的后端（用于把"静默降级"变成显式可见）
+        self.requested_backend = "sqlite-vec" if use_sqlite_vec else "sqlite-bruteforce"
+        self.backend = self.requested_backend
+        #: 降级原因；``None`` 表示没有降级
+        self.downgrade_reason: str | None = None
         self.cache_limit = cache_limit
         self.cancel = cancel_token or get_cancellation_token()
         self._lock = threading.RLock()
@@ -239,24 +243,32 @@ class SqliteVectorStore(VectorStore):
         self._matrix_ids: Any = None
         self._vec_available = False
         if use_sqlite_vec:
-            self._vec_available = self._try_load_vec_extension()
+            self._vec_available, self.downgrade_reason = self._try_load_vec_extension()
             if not self._vec_available:
-                logger.warning("sqlite-vec 扩展不可用，退化为全量向量检索")
+                # 用户明确要了 sqlite-vec 却用不上：这是**配置没生效**，
+                # 不是正常退化，必须让他在命令行上看得见。
+                logger.warning(
+                    "配置要求 sqlite-vec，但扩展不可用，已降级为全量检索：%s。"
+                    "安装方式：pip install sqlite-vec",
+                    self.downgrade_reason,
+                )
                 self.backend = "sqlite-bruteforce"
 
-    def _try_load_vec_extension(self) -> bool:
+    def _try_load_vec_extension(self) -> tuple[bool, str | None]:
+        """尝试加载 sqlite-vec，返回 ``(是否成功, 失败原因)``。"""
         try:
             import sqlite_vec  # type: ignore
-
+        except Exception as exc:  # noqa: BLE001
+            return False, f"未安装 sqlite-vec（{type(exc).__name__}）"
+        try:
             conn = self.db.conn
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
-            logger.info("已启用 sqlite-vec 原生向量扩展")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            logger.info("sqlite-vec 不可用：%s", exc)
-            return False
+        except Exception as exc:  # noqa: BLE001 - 驱动不支持 / 版本不匹配
+            return False, f"{type(exc).__name__}: {exc}"
+        logger.info("已启用 sqlite-vec 原生向量扩展")
+        return True, None
 
     # ---- 写入 ----
 
@@ -466,8 +478,12 @@ class SqliteVectorStore(VectorStore):
     def health(self) -> dict[str, Any]:
         return {
             "backend": self.backend,
+            "requested_backend": self.requested_backend,
             "count": self.count(),
             "sqlite_vec": self._vec_available,
+            # 非 None 表示"配置要的后端没生效"，调用方应显式提示用户
+            "downgrade_reason": self.downgrade_reason,
+            "accelerated": self._matrix is not None,
         }
 
 
@@ -513,7 +529,16 @@ def create_vector_store(
                 "pip install -r requirements-optional.txt",
                 store.backend,
             )
-        logger.info("向量库后端：%s", store.backend)
+        if getattr(store, "downgrade_reason", None):
+            # 配置里写死的后端没生效，用户有权知道，而不是只在日志里躺一条 info
+            logger.warning(
+                "向量库后端：%s（配置要求 %s，未生效原因：%s）",
+                store.backend,
+                store.requested_backend,
+                store.downgrade_reason,
+            )
+        else:
+            logger.info("向量库后端：%s", store.backend)
         return store
     except Exception as exc:  # noqa: BLE001
         raise VectorStoreError(f"无法初始化向量库：{exc}; 先前错误：{errors}") from exc

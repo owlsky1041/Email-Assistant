@@ -75,6 +75,41 @@ def has_display() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def x11_tray_host_available() -> bool | None:
+    """X11 下是否真的有系统托盘宿主。
+
+    ``None`` 表示"判断不了"（非 Linux/X11，或没有 python-xlib）。
+
+    为什么需要它：pystray 的 X11 后端走的是老的 XEmbed 协议，需要
+    ``_NET_SYSTEM_TRAY_S<screen>`` 这个 selection 有人持有。而 Plasma 6、
+    GNOME 3.26+ 等现代桌面**只提供 StatusNotifierItem**，根本不建这个
+    selection —— 此时 pystray 会在自己的后台线程里抛 AssertionError，
+    异常传不回 ``icon.run()``，于是进程活着、图标永远不出现，用户看到的
+    是一个"什么都没发生"的命令。
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+        return None  # 纯 Wayland 走 appindicator 后端，判断不了
+    if not os.environ.get("DISPLAY"):
+        return False
+    try:
+        from Xlib import display as xdisplay  # type: ignore
+    except Exception:  # noqa: BLE001 - 没有 python-xlib 就交给 pystray 自己试
+        return None
+    try:
+        conn = xdisplay.Display()
+        try:
+            screen = conn.get_default_screen()
+            atom = conn.intern_atom(f"_NET_SYSTEM_TRAY_S{screen}")
+            owner = conn.get_selection_owner(atom)
+            return bool(owner)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def open_local_path(path: str | Path) -> bool:
     """用系统默认程序打开本地文件/目录。"""
     target = Path(path)
@@ -155,6 +190,19 @@ class TrayApplication:
             self.start_api_process()
 
         usable = self.config.tray.enabled and TRAY_AVAILABLE and has_display()
+        if usable and not self._tray_host_ready():
+            reason = (
+                "当前桌面没有 XEmbed 系统托盘"
+                "（Plasma 6 / GNOME 3.26+ 只提供 StatusNotifierItem）"
+            )
+            logger.warning("托盘不可用：%s，改为守护模式", reason)
+            logger.warning(
+                "设置界面仍可用：执行 `main.py settings`，"
+                "或直接编辑配置文件；同步照常在后台运行。"
+            )
+            self._notify(f"托盘不可用（{reason}），已在后台运行")
+            return self._run_headless()
+
         if not usable:
             reason = (
                 "配置已禁用托盘"
@@ -176,6 +224,13 @@ class TrayApplication:
             threading.Timer(3.0, self._action_open_settings).start()
 
         return self._run_tray()
+
+    def _tray_host_ready(self) -> bool:
+        """托盘宿主预检，避免"进程活着但图标永远不出现"。"""
+        available = x11_tray_host_available()
+        if available is None:
+            return True  # 判断不了就交给 pystray 自己试
+        return available
 
     def _run_headless(self) -> int:
         try:
