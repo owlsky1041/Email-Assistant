@@ -67,6 +67,12 @@ sync:
   download_attachments: true
   max_body_index_size_kb: 2048
 
+clean:
+  strip_signature: true                # 剔除签名区（"-- " 之后）
+  strip_quoted_history: false          # 保留转发/引用历史（默认保留，删掉不可恢复）
+  strip_legal_disclaimer: true         # 剔除法务免责声明
+  noise_tail_ratio: 0.3                # 只在邮件末尾 30% 内寻找噪音标记，避免误伤转发内容
+
 embedding:
   backend: "auto"                      # auto | onnx | sentence-transformers | hashing
   model: "BAAI/bge-small-zh-v1.5"

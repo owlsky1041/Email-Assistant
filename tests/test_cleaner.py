@@ -98,21 +98,31 @@ class TestStripNoise:
         assert "销售部" not in strip_noise(text)
         assert "正文内容" in strip_noise(text)
 
-    def test_cuts_chinese_quote_header(self) -> None:
+    def test_keeps_quoted_history_by_default(self) -> None:
+        """**默认保留引用/转发历史** —— 它们是知识库的重要来源。
+
+        转发的历史内容删掉无法恢复，因此默认不动。
+        """
         text = "好的，收到。\n\n在 2024年3月1日 10:00，李四 <li@x.com> 写道：\n> 原始内容"
         result = strip_noise(text)
         assert "好的，收到。" in result
+        assert "原始内容" in result, "引用历史默认必须保留"
+
+    def test_cuts_chinese_quote_header_when_enabled(self) -> None:
+        text = "好的，收到。\n\n在 2024年3月1日 10:00，李四 <li@x.com> 写道：\n> 原始内容"
+        result = strip_noise(text, strip_quoted_history=True)
+        assert "好的，收到。" in result
         assert "原始内容" not in result
 
-    def test_cuts_english_quote_header(self) -> None:
+    def test_cuts_english_quote_header_when_enabled(self) -> None:
         text = "Thanks.\n\nOn Mon, Mar 1, 2024 at 10:00 AM Alice <a@x.com> wrote:\n> old"
-        result = strip_noise(text)
+        result = strip_noise(text, strip_quoted_history=True)
         assert "Thanks." in result
         assert "old" not in result
 
-    def test_cuts_outlook_original_message_marker(self) -> None:
+    def test_cuts_outlook_original_message_marker_when_enabled(self) -> None:
         text = "答复见上。\n\n------------------ 原始邮件 ------------------\n发件人: 王五"
-        result = strip_noise(text)
+        result = strip_noise(text, strip_quoted_history=True)
         assert "答复见上。" in result
         assert "王五" not in result
 
@@ -120,8 +130,12 @@ class TestStripNoise:
         text = "项目已上线。\n本邮件（含附件）可能包含保密信息，如果您不是指定的收件人请删除。"
         assert "保密信息" not in strip_noise(text)
 
-    def test_removes_quoted_lines(self) -> None:
-        assert "> 引用" not in strip_noise("正文\n> 引用\n更多正文")
+    def test_quoted_lines_kept_by_default(self) -> None:
+        assert "> 引用" in strip_noise("正文\n> 引用\n更多正文")
+
+    def test_removes_quoted_lines_when_enabled(self) -> None:
+        assert "> 引用" not in strip_noise("正文\n> 引用\n更多正文",
+                                            strip_quoted_history=True)
 
     def test_cuts_mobile_signature(self) -> None:
         assert "iPhone" not in strip_noise("已收到。\n\n发自我的 iPhone")
@@ -142,9 +156,16 @@ class TestStripNoise:
 
 
 class TestStripNoiseMarkdown:
-    def test_removes_markdown_blockquote_blocks(self) -> None:
+    def test_keeps_blockquote_blocks_by_default(self) -> None:
+        """默认保留引用块：转发邮件的正文常整体位于引用块内。"""
         md = "我的回复\n\n> 对方之前说的内容\n\n结束语"
         result = strip_noise_markdown(md)
+        assert "对方之前说的内容" in result
+        assert "我的回复" in result
+
+    def test_removes_blockquote_blocks_when_enabled(self) -> None:
+        md = "我的回复\n\n> 对方之前说的内容\n\n结束语"
+        result = strip_noise_markdown(md, strip_quoted_history=True)
         assert "对方之前说的内容" not in result
         assert "我的回复" in result
 
@@ -164,6 +185,19 @@ class TestComposeBody:
         assert "正文" in md
         assert "签名部门" not in md
 
+    def test_policy_controls_quoted_history(self) -> None:
+        """清洗策略应当可配置，且默认保留转发历史。"""
+        from src.cleaner import CleanPolicy
+
+        html = "<p>回复内容</p><blockquote><p>被引用的历史内容</p></blockquote>"
+        keep_md, _ = compose_body("", html)
+        assert "被引用的历史内容" in keep_md, "默认必须保留引用历史"
+
+        strip_md, _ = compose_body(
+            "", html, policy=CleanPolicy(strip_quoted_history=True)
+        )
+        assert "被引用的历史内容" not in strip_md
+
     def test_plain_is_derived_from_markdown(self) -> None:
         _, plain = compose_body("", "<p><b>加粗</b>文字</p>")
         assert "**" not in plain
@@ -172,6 +206,29 @@ class TestComposeBody:
     def test_empty_both(self) -> None:
         md, plain = compose_body("", "")
         assert md == "" and plain == ""
+
+    def test_markdown_escape_does_not_corrupt_literal_underscore(self) -> None:
+        """回归：``zj\\_foo@corp.com`` 不得降级成 ``zj\\foo@corp.com``。
+
+        真实邮件里地址、文件名、编号大量使用下划线；如果先删强调符号
+        再处理转义，就会把下划线吞掉而留下一个反斜杠，检索直接失效。
+        """
+        _, plain = compose_body(
+            "", '<p>发件人：<a href="mailto:zj_foo@corp.com">zj_foo@corp.com</a></p>'
+        )
+        assert "zj_foo@corp.com" in plain
+        assert "\\" not in plain
+
+    def test_plain_drops_blockquote_markers_but_keeps_inline_gt(self) -> None:
+        """转发历史的引用层级 ``> > >`` 只污染片段，行内 ``->`` 必须保留。"""
+        _, plain = compose_body(
+            "",
+            "<blockquote><blockquote><p>于总，请查收</p></blockquote></blockquote>"
+            "<p>吉玛DMS-&gt;PBS 技术协议</p>",
+        )
+        assert "于总，请查收" in plain
+        assert ">" not in plain.splitlines()[0]
+        assert "DMS->PBS" in plain
 
     def test_full_pipeline_chinese_business_email(self) -> None:
         """真实场景回归：一份带追踪像素、内联图、签名、免责声明的中文商务邮件。"""
@@ -338,10 +395,26 @@ class TestForwardedMailBodyRecovery:
         assert "请查收" in plain
         assert md.strip() != ""
 
-    def test_metadata_fields_removed(self) -> None:
+    def test_forward_header_kept_by_default(self) -> None:
+        """默认保留转发头部 —— 它提供了溯源信息（原发件人/时间/主题）。
+
+        用户明确要求"不要漏掉邮件中历史转发内容"，因此保守保留。
+        """
         _, plain = compose_body("", self._html(), subject=self.SUBJECT)
-        for field in ("发件人：", "发送时间：", "收件人："):
-            assert field not in plain, f"元数据字段 {field} 应当被剔除"
+        assert "柴平海" in plain, "原发件人应保留，便于溯源"
+        assert "2022-09-01" in plain, "原发送时间应保留"
+        assert "各位领导好" in plain, "转发正文必须保留"
+
+    def test_metadata_stripped_when_history_disabled(self) -> None:
+        """显式开启"剔除引用历史"时才清掉转发头部元数据。"""
+        from src.cleaner import CleanPolicy
+
+        _, plain = compose_body(
+            "", self._html(), subject=self.SUBJECT,
+            policy=CleanPolicy(strip_quoted_history=True),
+        )
+        assert "发件人：" not in plain
+        assert "各位领导好" in plain, "即使剔除头部，正文也不能丢"
 
     def test_subject_prefix_variants(self) -> None:
         """正文里的主题值不带「转发:」前缀，必须能匹配上。"""

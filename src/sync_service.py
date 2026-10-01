@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .cancellation import CancellationToken, CancelledError, get_cancellation_token
+from .cleaner import CleanPolicy
 from .config import AppConfig
 from .database import Database
 from .imap_client import ImapClient, ImapError, MessageFetchPlan, PartInfo
@@ -72,6 +73,12 @@ class SyncService:
             max_attachment_bytes=int(config.sync.max_attachment_size_mb * 1024 * 1024),
             download_attachments=config.sync.download_attachments,
             max_body_bytes=config.sync.max_body_index_size_kb * 1024,
+            policy=CleanPolicy(
+                strip_signature=config.clean.strip_signature,
+                strip_quoted_history=config.clean.strip_quoted_history,
+                strip_legal_disclaimer=config.clean.strip_legal_disclaimer,
+                noise_tail_ratio=config.clean.noise_tail_ratio,
+            ),
         )
         self._last_result: SyncResult | None = None
         self._running = False
@@ -642,7 +649,7 @@ class SyncService:
                         plain_parts.append(text)
 
             if plain_parts or html_parts:
-                from .cleaner import compose_body
+                from .cleaner import CleanPolicy, compose_body
 
                 parsed.text_plain = "\n\n".join(plain_parts)
                 parsed.text_html = "\n\n".join(html_parts)

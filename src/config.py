@@ -148,6 +148,29 @@ class SyncConfig(BaseModel):
         return v
 
 
+class CleanConfig(BaseModel):
+    """正文清洗策略。
+
+    **默认保留转发/引用历史**：转发邮件里的历史内容往往是知识库里
+    最有价值的部分，删掉无法恢复。需要更"干净"的正文时才显式开启。
+    """
+
+    strip_signature: bool = True
+    strip_quoted_history: bool = False
+    strip_legal_disclaimer: bool = True
+    #: 只在邮件末尾该比例区域内寻找噪音标记（默认最后 30%）。
+    #: 范围开得太大时，出现在转发历史中间的签名/免责声明会把
+    #: 其后的全部内容一并截掉。
+    noise_tail_ratio: float = 0.3
+
+    @field_validator("noise_tail_ratio")
+    @classmethod
+    def _check_ratio(cls, v: float) -> float:
+        if not (0.05 <= v <= 1.0):
+            raise ValueError("noise_tail_ratio 必须在 0.05-1.0 之间")
+        return v
+
+
 class EmbeddingConfig(BaseModel):
     """嵌入模型配置。"""
 
@@ -268,6 +291,7 @@ class AppConfig(BaseModel):
     sync: SyncConfig = Field(default_factory=SyncConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     vector: VectorConfig = Field(default_factory=VectorConfig)
+    clean: CleanConfig = Field(default_factory=CleanConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     log: LogConfig = Field(default_factory=LogConfig)

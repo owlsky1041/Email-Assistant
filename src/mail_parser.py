@@ -18,7 +18,7 @@ from email.message import Message
 from email.utils import collapse_rfc2231_value, getaddresses, parsedate_to_datetime
 from typing import Any
 
-from .cleaner import compose_body
+from .cleaner import DEFAULT_POLICY, CleanPolicy, compose_body
 from .models import AttachmentMeta, ParsedMessage
 from .utils import sanitize_filename
 
@@ -204,10 +204,12 @@ class MailParser:
         max_attachment_bytes: int = 50 * 1024 * 1024,
         download_attachments: bool = True,
         max_body_bytes: int = 2 * 1024 * 1024,
+        policy: "CleanPolicy | None" = None,
     ) -> None:
         self.max_attachment_bytes = max_attachment_bytes
         self.download_attachments = download_attachments
         self.max_body_bytes = max_body_bytes
+        self.policy = policy or DEFAULT_POLICY
 
     # -- 对外接口 --------------------------------------------------------
 
@@ -333,7 +335,7 @@ class MailParser:
                 cid_map[meta.content_id] = f"attachments/{meta.filename}"
 
         markdown, plain = compose_body(raw_plain, raw_html, cid_map,
-                                       subject=result.subject)
+                                       subject=result.subject, policy=self.policy)
         result.text_plain = raw_plain
         result.text_html = raw_html
         result.body_markdown = markdown

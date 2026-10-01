@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -363,15 +364,32 @@ _SEPARATOR_RE = re.compile(r"^\s*[-=_*]{3,}\s*$")
 _QUOTED_LINE_RE = re.compile(r"^\s*>{1,}")
 
 
-def _find_noise_cut(lines: list[str], min_keep_ratio: float = 0.15) -> int | None:
+def _find_noise_cut(
+    lines: list[str],
+    *,
+    tail_ratio: float = 0.3,
+    strip_signature: bool = True,
+    strip_quoted_history: bool = False,
+    strip_legal: bool = True,
+    min_tail_lines: int = 8,
+) -> int | None:
     """返回应当截断的行号（保留 ``[:cut]``）。
 
-    只在邮件后 85% 区域寻找噪音标记，避免误伤正文开头提到的「发件人:」等内容。
+    两个关键取舍
+    ------------
+    1. **默认保留引用/转发历史**（``strip_quoted_history=False``）。
+       转发邮件里的历史内容往往是知识库最有价值的部分，
+       早期实现把它当噪音删掉，属于数据丢失。
+    2. **只在邮件末尾 ``tail_ratio`` 区域内寻找标记**（默认最后 30%）。
+       早期把搜索范围放到后 85%，一旦签名或免责声明出现在转发历史
+       中间，就会把它之后的全部内容一并截掉。
     """
     n = len(lines)
     if n == 0:
         return None
-    floor = max(int(n * min_keep_ratio), 0)
+    # 比例窗口 + 绝对保底：短邮件（如 5 行）按比例算只剩一两行，
+    # 签名根本落不进窗口。保底确保至少搜索末尾 min_tail_lines 行。
+    floor = max(0, min(int(n * (1.0 - tail_ratio)), n - min_tail_lines))
     candidates: list[int] = []
 
     for i in range(floor, n):
@@ -380,31 +398,34 @@ def _find_noise_cut(lines: list[str], min_keep_ratio: float = 0.15) -> int | Non
         if not stripped:
             continue
 
-        if _SIG_SEP_RE.match(line):
+        if strip_signature and _SIG_SEP_RE.match(line):
             candidates.append(i)
             continue
-        if _MOBILE_SIG_RE.match(line):
-            candidates.append(i)
-            continue
-        if _QUOTE_HEADER_CN.match(line) or _QUOTE_HEADER_EN.match(line):
-            candidates.append(i)
-            continue
-        if _QUOTE_HEADER_ZH_CN.match(line):
+        if strip_signature and _MOBILE_SIG_RE.match(line):
             candidates.append(i)
             continue
 
-        lowered = stripped.lower()
-        for marker in _LEGAL_MARKERS:
-            if marker in lowered or marker in stripped:
+        if strip_quoted_history:
+            if _QUOTE_HEADER_CN.match(line) or _QUOTE_HEADER_EN.match(line):
                 candidates.append(i)
-                break
-        else:
-            # 「发件人:/From:」开头的引用块：需连续出现至少 2 个引用字段才认定
-            if _QUOTE_FIELD_RE.match(line):
-                window = [l.strip() for l in lines[i : i + 6] if l.strip()]
-                hits = sum(1 for l in window if _QUOTE_FIELD_RE.match(l))
-                if hits >= 2:
+                continue
+            if _QUOTE_HEADER_ZH_CN.match(line):
+                candidates.append(i)
+                continue
+
+        if strip_legal:
+            lowered = stripped.lower()
+            for marker in _LEGAL_MARKERS:
+                if marker in lowered or marker in stripped:
                     candidates.append(i)
+                    break
+            else:
+                if strip_quoted_history and _QUOTE_FIELD_RE.match(line):
+                    # 「发件人:/From:」引用块：需连续出现至少 2 个引用字段才认定
+                    window = [l.strip() for l in lines[i : i + 6] if l.strip()]
+                    hits = sum(1 for l in window if _QUOTE_FIELD_RE.match(l))
+                    if hits >= 2:
+                        candidates.append(i)
 
     if not candidates:
         return None
@@ -412,23 +433,37 @@ def _find_noise_cut(lines: list[str], min_keep_ratio: float = 0.15) -> int | Non
     return cut if cut > 0 else None
 
 
-def strip_noise(text: str) -> str:
-    """切除签名、历史引用与免责声明。
+def strip_noise(
+    text: str,
+    *,
+    strip_signature: bool = True,
+    strip_quoted_history: bool = False,
+    strip_legal: bool = True,
+    tail_ratio: float = 0.3,
+) -> str:
+    """切除签名与免责声明。
 
-    保守策略：只有确认找到噪音标记才截断，否则原样返回。
+    **默认不动引用/转发历史** —— 转发邮件中的历史内容属于用户资产，
+    删掉就无法恢复。需要时可显式开启 ``strip_quoted_history``。
     """
     if not text or not text.strip():
         return ""
 
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    cut = _find_noise_cut(lines)
+    cut = _find_noise_cut(
+        lines,
+        tail_ratio=tail_ratio,
+        strip_signature=strip_signature,
+        strip_quoted_history=strip_quoted_history,
+        strip_legal=strip_legal,
+    )
     if cut is not None:
         lines = lines[:cut]
 
-    # 移除单独成行的引用行与分隔线（保守：仅当整行就是引用/分隔线）
+    # 移除单独成行的引用行与分隔线（仅当显式要求剔除引用历史时）
     cleaned: list[str] = []
     for line in lines:
-        if _QUOTED_LINE_RE.match(line):
+        if strip_quoted_history and _QUOTED_LINE_RE.match(line):
             continue
         if _SEPARATOR_RE.match(line) and len(line.strip()) >= 3:
             continue
@@ -437,6 +472,8 @@ def strip_noise(text: str) -> str:
     out = "\n".join(cleaned)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
 
 
 #: 转发/回复头部的字段标记，形如 ``**发件人：**`` / ``**From:**``。
@@ -539,20 +576,41 @@ def _body_mostly_lost(original: str, cleaned: str) -> bool:
     return len(dst) < max(30, len(src) * 0.25)
 
 
-def strip_noise_markdown(md: str) -> str:
-    """Markdown 版噪音过滤：在纯文本规则之外，额外处理引用块。"""
+
+def strip_noise_markdown(
+    md: str,
+    *,
+    strip_signature: bool = True,
+    strip_quoted_history: bool = False,
+    strip_legal: bool = True,
+    tail_ratio: float = 0.3,
+) -> str:
+    """Markdown 版噪音过滤。
+
+    默认**保留引用块**：转发邮件的历史内容常整体位于引用块内，
+    早期"丢弃所有以 > 开头的块"会把整封正文删光。
+    """
     if not md:
         return ""
-    # 引用块：只剔除"纯引用"的块（整块都是引用行），
-    # 不再简单丢弃所有以 > 开头的块 —— 转发邮件的正文常常整体在引用块里。
-    blocks = re.split(r"\n\s*\n", md)
-    kept = []
-    for block in blocks:
-        lines = [ln for ln in block.split("\n") if ln.strip()]
-        if lines and all(ln.lstrip().startswith(">") for ln in lines):
-            continue
-        kept.append(block)
-    return normalize_markdown(strip_noise("\n\n".join(kept)))
+    text = md
+    if strip_quoted_history:
+        blocks = re.split(r"\n\s*\n", md)
+        kept = []
+        for block in blocks:
+            lines = [ln for ln in block.split("\n") if ln.strip()]
+            if lines and all(ln.lstrip().startswith(">") for ln in lines):
+                continue
+            kept.append(block)
+        text = "\n\n".join(kept)
+    return normalize_markdown(
+        strip_noise(
+            text,
+            strip_signature=strip_signature,
+            strip_quoted_history=strip_quoted_history,
+            strip_legal=strip_legal,
+            tail_ratio=tail_ratio,
+        )
+    )
 
 
 def dedupe_paragraphs(text: str) -> str:
@@ -572,26 +630,48 @@ def dedupe_paragraphs(text: str) -> str:
     return "\n\n".join(out)
 
 
+@dataclass(slots=True)
+class CleanPolicy:
+    """清洗策略（与 config.CleanConfig 对应，避免 cleaner 依赖配置模块）。"""
+
+    strip_signature: bool = True
+    strip_quoted_history: bool = False
+    strip_legal_disclaimer: bool = True
+    noise_tail_ratio: float = 0.3
+
+
+DEFAULT_POLICY = CleanPolicy()
+
+
 def compose_body(
     text_plain: str,
     html: str,
     cid_map: dict[str, str] | None = None,
     subject: str = "",
+    policy: "CleanPolicy | None" = None,
 ) -> tuple[str, str]:
     """生成 ``(markdown, plain_text)`` 正文对。
 
     优先使用 ``text/html``（结构更完整），退化到 ``text/plain``。
     两种来源都会经过噪音过滤。
     """
+    policy = policy or DEFAULT_POLICY
+    noise_kwargs = {
+        "strip_signature": policy.strip_signature,
+        "strip_quoted_history": policy.strip_quoted_history,
+        "strip_legal": policy.strip_legal_disclaimer,
+        "tail_ratio": policy.noise_tail_ratio,
+    }
+
     markdown = ""
     if html and html.strip():
         markdown = html_to_markdown(html, cid_map)
-        markdown = strip_noise_markdown(markdown)
+        markdown = strip_noise_markdown(markdown, **noise_kwargs)
 
     plain_source = text_plain or ""
     if not markdown.strip():
         # 没有可用 HTML，用 text/plain
-        markdown = text_to_markdown_ish(strip_noise(plain_source))
+        markdown = text_to_markdown_ish(strip_noise(plain_source, **noise_kwargs))
     elif plain_source.strip():
         # 有 HTML 时，也检查 plain 是否包含 HTML 里没有的尾巴（少见），不做合并以免重复
         pass
@@ -608,11 +688,37 @@ def compose_body(
             markdown = salvaged
 
     markdown = dedupe_paragraphs(normalize_markdown(markdown))
-    plain = normalize_markdown(markdown)
-    plain = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", plain)  # 去掉图片语法
-    plain = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", plain)  # 链接保留文字
-    plain = re.sub(r"^#{1,6}\s*", "", plain, flags=re.MULTILINE)
-    plain = re.sub(r"[*_`]{1,3}", "", plain)
-    plain = re.sub(r"[ \t]+", " ", plain)
-    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
+    plain = _markdown_to_plain(markdown)
     return markdown, plain
+
+
+#: Markdown 反斜杠转义，例如 ``\_`` ``\*`` ``\[``
+_MD_ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+.!~>-])")
+
+
+def _markdown_to_plain(markdown: str) -> str:
+    """把 Markdown 正文降级为纯文本（用于 FTS / 向量切片）。
+
+    要点：必须先「寄存」反斜杠转义再清理强调符号。
+    否则 ``zj\\_zhangzhongxu@rong-sheng.com`` 会因为 ``_`` 被删掉而
+    退化成 ``zj\\zhangzhongxu@rong-sheng.com``——邮箱地址、文件名里的
+    下划线被破坏，检索也就搜不到了。
+    """
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", markdown)  # 去掉图片语法
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)  # 链接保留文字
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # 引用层级标记：转发历史层层嵌套后会变成 "> > > > 正文"，
+    # 保留下来只会污染检索片段，正文本身不受影响。
+    text = re.sub(r"^(?:[ \t]*>)+[ \t]?", "", text, flags=re.MULTILINE)
+
+    stash: list[str] = []
+
+    def _stash(match: re.Match[str]) -> str:
+        stash.append(match.group(1))
+        return f"\x00{len(stash) - 1}\x00"
+
+    text = _MD_ESCAPE_RE.sub(_stash, text)
+    text = re.sub(r"[*_`]{1,3}", "", text)  # 清理强调/代码符号
+    text = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
