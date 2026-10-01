@@ -439,6 +439,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
             (ok if status == "success" else warn)(f"同步完成：状态 {status}")
             info(f"  下载 {payload['fetched']} 封 / 归档 {payload['archived']} 封 / "
                  f"跳过 {payload['skipped']} / 失败 {payload['failed']} / 删除 {payload['deleted']}")
+            reused = payload.get("attachments_reused") or 0
+            if reused:
+                info(f"  附件去重：{reused} 个命中已有内容，用硬链接复用（未重复占盘）")
             if payload["error_summary"]:
                 warn(f"  错误摘要：{payload['error_summary']}")
             if not args.no_index:

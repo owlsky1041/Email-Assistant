@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
+import threading
 import unicodedata
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
+from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # 文件名安全化（Windows 优先）
@@ -144,7 +148,13 @@ class ChunkedFileWriter:
         mode: int = 0o600,
     ) -> None:
         self.target = Path(target)
-        self.tmp = self.target.with_name(self.target.name + ".tmp")
+        # 临时文件名必须**每个写入器唯一**：并发归档两个同名附件时，
+        # 共享 `<name>.tmp` 会让先提交的一方把该路径 rename 走，
+        # 后提交的一方直接 `os.replace` 失败（No such file or directory）。
+        self.tmp = self.target.with_name(
+            f".{self.target.name}.{os.getpid()}.{threading.get_ident()}"
+            f".{uuid4().hex[:8]}.tmp"
+        )
         self.expected_size = expected_size
         self.chunk_size = chunk_size
         self.mode = mode
@@ -240,7 +250,12 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def dedupe_path(path: Path) -> Path:
-    """若目标已存在，追加 ``_1``、``_2`` … 直到不冲突。"""
+    """若目标已存在，追加 ``_1``、``_2`` … 直到不冲突。
+
+    ⚠️ 这只是**尽力而为**：``exists()`` 与后续写入之间不是原子的，
+    并发归档时两个线程可能拿到同一个名字。需要排他占位请用
+    :func:`claim_path` / :func:`link_or_copy_exclusive`。
+    """
     if not path.exists():
         return path
     stem, suffix = path.stem, path.suffix
@@ -249,6 +264,60 @@ def dedupe_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     return path.with_name(f"{stem}_{os.getpid()}{suffix}")
+
+
+def candidate_paths(path: Path, limit: int = 1000) -> Iterator[Path]:
+    """依次产出 ``x``、``x_1``、``x_2`` … 供原子占位使用。"""
+    stem, suffix = path.stem, path.suffix
+    yield path
+    for i in range(1, limit):
+        yield path.with_name(f"{stem}_{i}{suffix}")
+
+
+def claim_path(path: Path, *, mode: int = 0o600, limit: int = 1000) -> Path:
+    """**原子地**占住一个不重名的路径并返回它。
+
+    用 ``O_CREAT|O_EXCL`` 创建：并发线程里只有一个能成功，其余自动退到
+    下一个候选名。仅靠 ``dedupe_path()`` 的 ``exists()`` 判断做不到这点 ——
+    两个工作线程会同时认为名字可用，然后互相覆盖对方的附件。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for candidate in candidate_paths(path, limit):
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    raise OSError(f"同名文件过多，无法占位：{path}")
+
+
+def link_or_copy_exclusive(source: Path, path: Path, *, limit: int = 1000) -> Path | None:
+    """把 ``source`` 用硬链接（优先）或复制放到一个不重名的路径上。
+
+    硬链接本身是原子的：目标已存在会抛 ``FileExistsError``，并发下不会
+    互相覆盖。复制没有排他语义，退化为"先查存在再写"。
+    """
+    for candidate in candidate_paths(path, limit):
+        try:
+            os.link(source, candidate)
+            return candidate
+        except FileExistsError:
+            continue
+        except OSError:
+            break  # 跨卷 / 文件系统不支持硬链接
+
+    for candidate in candidate_paths(path, limit):
+        if candidate.exists():
+            continue
+        try:
+            shutil.copy2(source, candidate)
+            return candidate
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------

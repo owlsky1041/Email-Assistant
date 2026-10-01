@@ -68,7 +68,7 @@ class SyncService:
         self.cancel = cancel_token or get_cancellation_token()
         self.on_progress = on_progress
         self.account = config.email.address
-        self.exporter = MarkdownExporter(config)
+        self.exporter = MarkdownExporter(config, blob_lookup=self._lookup_attachment_blob)
         self.parser = MailParser(
             max_attachment_bytes=int(config.sync.max_attachment_size_mb * 1024 * 1024),
             download_attachments=config.sync.download_attachments,
@@ -513,6 +513,27 @@ class SyncService:
             if exc is not None and not isinstance(exc, CancelledError):
                 logger.error("并发下载任务异常：%s", exc)
 
+    def _lookup_attachment_blob(self, sha256: str) -> Path | None:
+        """按内容哈希找一份已落盘的附件，用于跨邮件去重。
+
+        **必须校验文件仍然存在**：数据库里的路径可能因为用户手工删文件、
+        换了数据目录而失效，直接复用会得到一个指向空气的链接。
+        """
+        try:
+            row = self.db.attachment_by_hash(sha256)
+        except Exception:  # noqa: BLE001 - 去重是优化，失败不该拖垮归档
+            logger.debug("附件去重查询失败", exc_info=True)
+            return None
+        if row is None:
+            return None
+        path = row["local_path"]
+        if not path:
+            return None
+        candidate = Path(path)
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+        return None
+
     def _process_one(
         self,
         client: ImapClient,
@@ -552,6 +573,7 @@ class SyncService:
                 )
 
             result.archived += 1
+            result.attachments_reused += archive.attachments_reused
             if parsed.message_id:
                 result.new_message_ids.append(parsed.message_id)
             self._emit(

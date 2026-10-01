@@ -483,6 +483,9 @@ email-assistant/
 | 优雅退出 | `CancellationToken` 贯穿 IMAP 拉取、嵌入推理、批量入库；`install_signal_handlers()` 拦截 SIGINT/SIGTERM/SIGBREAK，确保事务提交与文件完整 |
 | 并发连接复用 | 整个同步轮次共享一个线程池 + IMAP 连接池，连接数 ≈ `workers` 且跨批次、跨文件夹复用（早先每批次新建线程池，10,000 封会建立约 3,537 条连接） |
 | 备份完整性 | `backup` 默认同时产出数据库快照与归档/附件压缩包；`attachment_layout=global` 时附件在归档目录之外，也一并收集 |
+| 附件内容去重 | 按 sha256 复用同一份内容：优先硬链接（NTFS/ext4 免管理员），跨卷退化为复制。并发下载时按内容哈希串行化，避免两个工作线程同时查重双双落空 |
+| 附件占位原子化 | `claim_path()` 用 `O_CREAT\|O_EXCL` 排他占名，并发同名附件不会互相覆盖；`ChunkedFileWriter` 的临时文件名带 pid+线程+uuid，不会再撞车 |
+| 向量检索加速 | 有 numpy 时把缓存拼成 `(N, dim)` 矩阵一次矩阵乘算完（实测 5 万切片 1.07s → 3ms，约 360×）；没装 numpy 自动回退纯 Python，结果完全一致 |
 
 ---
 

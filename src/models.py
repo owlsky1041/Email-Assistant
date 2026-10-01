@@ -233,6 +233,8 @@ class SyncResult:
     skipped: int = 0
     failed: int = 0
     deleted: int = 0
+    #: 附件命中内容去重、用硬链接复用而非重复写盘的个数
+    attachments_reused: int = 0
     new_message_ids: list[str] = field(default_factory=list)
     error_summary: str | None = None
     started_at: datetime | None = None
@@ -244,6 +246,7 @@ class SyncResult:
         self.skipped += other.skipped
         self.failed += other.failed
         self.deleted += other.deleted
+        self.attachments_reused += other.attachments_reused
         self.new_message_ids.extend(other.new_message_ids)
         if other.error_summary:
             self.error_summary = (
@@ -269,6 +272,7 @@ class SyncResult:
             "skipped": self.skipped,
             "failed": self.failed,
             "deleted": self.deleted,
+            "attachments_reused": self.attachments_reused,
             "new_messages": len(self.new_message_ids),
             "error_summary": self.error_summary,
             "started_at": self.started_at.isoformat() if self.started_at else None,

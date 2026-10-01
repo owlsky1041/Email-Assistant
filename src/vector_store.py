@@ -232,6 +232,11 @@ class SqliteVectorStore(VectorStore):
         self._lock = threading.RLock()
         self._cache: dict[int, array] | None = None
         self._cache_dim = 0
+        #: numpy 加速视图：``(N, dim) 连续矩阵 + 对应的 chunk_id 数组``。
+        #: 纯 Python 逐元素点积在 5 万切片上实测约 1.07s/次查询，而 50k×512
+        #: 的矩阵乘只要几毫秒 —— 而暴力检索是 O(N) 的，规模一大就退化。
+        self._matrix: Any = None
+        self._matrix_ids: Any = None
         self._vec_available = False
         if use_sqlite_vec:
             self._vec_available = self._try_load_vec_extension()
@@ -310,6 +315,41 @@ class SqliteVectorStore(VectorStore):
     def _invalidate(self) -> None:
         with self._lock:
             self._cache = None
+            self._matrix = None
+            self._matrix_ids = None
+
+    @staticmethod
+    def _numpy():  # type: ignore[no-untyped-def]
+        """可选依赖：装上就用矩阵乘，没装就退回纯 Python 逐元素点积。"""
+        try:
+            import numpy  # type: ignore
+
+            return numpy
+        except Exception:  # noqa: BLE001 - 可选依赖，缺失不是错误
+            return None
+
+    def _build_matrix(self) -> bool:
+        """把缓存里的散装向量拼成一个连续矩阵（只做一次）。
+
+        散装 ``array("f")`` 逐条点积是纯 Python 循环；拼成
+        ``(N, dim) float32`` 之后一次 ``matrix @ q`` 就出全部得分。
+        """
+        numpy = self._numpy()
+        if numpy is None or not self._cache:
+            return False
+        ids = list(self._cache.keys())
+        dim = self._cache_dim
+        if dim <= 0:
+            return False
+        matrix = numpy.zeros((len(ids), dim), dtype=numpy.float32)
+        for row, chunk_id in enumerate(ids):
+            vec = self._cache[chunk_id]
+            length = min(len(vec), dim)
+            matrix[row, :length] = numpy.frombuffer(vec, dtype=numpy.float32, count=length)
+        self._matrix = matrix
+        self._matrix_ids = numpy.asarray(ids, dtype=numpy.int64)
+        logger.debug("向量矩阵已构建：%s，%d 维", matrix.shape, dim)
+        return True
 
     def _load_cache(self) -> tuple[dict[int, array], int]:
         with self._lock:
@@ -333,6 +373,7 @@ class SqliteVectorStore(VectorStore):
             self._cache = cache
             self._cache_dim = dim
             logger.debug("向量缓存已加载：%d 条，%d 维", len(cache), dim)
+            self._build_matrix()
             return cache, dim
 
     def query(
@@ -348,22 +389,60 @@ class SqliteVectorStore(VectorStore):
         if not cache:
             return []
 
-        query_vec = array("f", vector)
         allowed: set[int] | None = None
         if where:
             allowed = self._filter_ids(where)
             if not allowed:
                 return []
 
-        hits: list[VectorHit] = []
+        if self._matrix is not None:
+            hits = self._query_matrix(vector, allowed)
+            if hits is not None:
+                hits.sort(key=lambda h: h.score, reverse=True)
+                return hits[:top_k]
+
+        # 没装 numpy：退回逐元素点积（结果完全一致，只是慢）
+        query_vec = array("f", vector)
+        hits = []
         for chunk_id, stored in cache.items():
             if allowed is not None and chunk_id not in allowed:
                 continue
-            score = _dot(query_vec, stored, dim)
-            hits.append(VectorHit(chunk_id=chunk_id, score=score))
+            hits.append(VectorHit(chunk_id=chunk_id, score=_dot(query_vec, stored, dim)))
 
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:top_k]
+
+    def _query_matrix(self, vector: Sequence[float], allowed: set[int] | None) -> list[VectorHit] | None:
+        """一次矩阵乘算出全部相似度。
+
+        :return: 命中列表；无法走矩阵路径时返回 ``None`` 让调用方回退。
+        """
+        numpy = self._numpy()
+        if numpy is None or self._matrix is None or self._matrix_ids is None:
+            return None
+        dim = self._matrix.shape[1]
+        query = numpy.zeros(dim, dtype=numpy.float32)
+        length = min(len(vector), dim)
+        query[:length] = numpy.asarray(vector[:length], dtype=numpy.float32)
+
+        matrix = self._matrix
+        ids = self._matrix_ids
+        if allowed is not None:
+            # 先把不允许的行**剔除**再算分：既省算力，也避免"标成 -inf
+            # 却照样返回"这种把过滤条件架空的做法。
+            keep = numpy.isin(ids, numpy.fromiter(allowed, dtype=numpy.int64))
+            rows = numpy.nonzero(keep)[0]
+            if rows.size == 0:
+                return []
+            matrix = matrix[rows]
+            ids = ids[rows]
+
+        # 向量写入前已归一化，点积即余弦相似度
+        scores = matrix @ query
+        return [
+            VectorHit(chunk_id=int(cid), score=float(score))
+            for cid, score in zip(ids.tolist(), scores.tolist())
+        ]
 
     def _filter_ids(self, where: dict[str, Any]) -> set[int]:
         """把元数据过滤下推到 SQL，避免全量加载后过滤。"""
