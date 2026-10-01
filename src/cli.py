@@ -753,12 +753,30 @@ def cmd_tray(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_backup(args: argparse.Namespace) -> int:
+    """备份。
+
+    **默认连归档文件与附件一起打包**：附件只存在于磁盘上，数据库里只有
+    路径和 sha256。只备份 ``mail.db`` 会让用户以为已经备份好了，
+    实际上附件永久丢失。需要廉价快照时才用 ``--db-only``。
+    """
     context = _load_context(args)
     try:
-        path = context.backup(include_files=args.with_files, label=args.label or "")
-        ok(f"备份完成：{path}")
+        # 兼容旧写法：--with-files 已经是默认行为
+        include_files = not args.db_only
+        result = context.backup_full(
+            include_files=include_files, label=args.label or ""
+        )
+        ok(f"备份完成：{result.db}")
         if not args.quiet:
-            info(f"  大小：{path.stat().st_size / 1024:.1f} KB")
+            info(f"  数据库：{result.db.stat().st_size / 1024:.1f} KB  {result.db}")
+        if result.files is not None:
+            if not args.quiet:
+                info(f"  归档与附件：{result.files.stat().st_size / 1024:.1f} KB  {result.files}")
+        else:
+            warn(
+                "本次只备份了数据库，**不含附件**。"
+                "附件无法仅凭数据库恢复，需要时请去掉 --db-only 重新备份。"
+            )
         return 0
     finally:
         context.close()
@@ -1045,8 +1063,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_tray.add_argument("--no-api", action="store_true", help="不启动 API 子进程")
     p_tray.set_defaults(func=cmd_tray)
 
-    p_backup = sub.add_parser("backup", help="备份数据库")
-    p_backup.add_argument("--with-files", action="store_true", help="同时打包归档目录")
+    p_backup = sub.add_parser("backup", help="备份数据库 + 归档文件（默认）")
+    p_backup.add_argument(
+        "--db-only",
+        action="store_true",
+        help="只备份数据库快照（**不含附件**，附件只能从压缩包恢复）",
+    )
+    # 旧写法：文件现在是默认行为，保留这个开关只为不破坏已有脚本
+    p_backup.add_argument("--with-files", action="store_true", help=argparse.SUPPRESS)
     p_backup.add_argument("--label", help="备份文件标签")
     p_backup.add_argument("--quiet", action="store_true")
     p_backup.set_defaults(func=cmd_backup)

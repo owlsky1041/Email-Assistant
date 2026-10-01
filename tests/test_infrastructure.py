@@ -257,11 +257,67 @@ class TestBackupRestore:
                                 body_markdown="正文", body_text="正文")
         context.sync.exporter.export(message, account="a@x.com")
 
-        archive = context.backup(include_files=True)
-        assert archive.suffix == ".zip"
-        with zipfile.ZipFile(archive) as zf:
+        result = context.backup_full(include_files=True)
+
+        # 数据库快照与压缩包都要有。早先 include_files=True 会**替换**掉
+        # 返回值，调用方再也拿不到 .db 路径，restore 直接没法用。
+        assert result.db.suffix == ".db" and result.db.is_file()
+        assert result.files is not None and result.files.suffix == ".zip"
+        assert result.complete
+        with zipfile.ZipFile(result.files) as zf:
             names = zf.namelist()
         assert any(name.endswith(".md") for name in names)
+
+    def test_backup_db_only_marks_incomplete(self, context: AppContext) -> None:
+        """只备数据库时要把"不完整"这件事表达出来，而不是悄悄返回。"""
+        result = context.backup_full(include_files=False)
+        assert result.db.suffix == ".db" and result.db.is_file()
+        assert result.files is None
+        assert not result.complete
+        assert result.paths() == [result.db]
+
+    def test_backup_default_of_low_level_api_is_db_only(self, context: AppContext) -> None:
+        """context.backup() 是廉价快照接口，定时维护依赖它，签名不能变。"""
+        path = context.backup()
+        assert isinstance(path, Path)
+        assert path.suffix == ".db" and path.is_file()
+        assert not list(path.parent.glob("*.zip")), "默认不应产生压缩包"
+
+    def test_backup_covers_attachments_outside_archive(
+        self, context: AppContext, tmp_path: Path
+    ) -> None:
+        """回归：attachment_layout=global 时附件不在归档目录下，必须单独收进来。
+
+        早先备份只打包 ``config.archive_path``，此时附件会被静默漏掉 ——
+        而数据库里只有路径和 sha256，文件丢了就再也恢复不回来。
+        """
+        import zipfile
+
+        from src.models import ParsedMessage
+
+        # 把附件根目录挪到归档目录之外（默认 tmp_config 就是这样，
+        # 这里再显式确认一遍，避免将来夹具改动后这个测试悄悄失效）
+        assert not context.config.attachment_path.is_relative_to(
+            context.config.archive_path
+        ), "夹具前提变了：附件目录应在归档目录之外"
+
+        context.config.storage.attachment_layout = "global"
+        message = ParsedMessage(uid="7", folder="INBOX", subject="带附件",
+                                body_markdown="正文", body_text="正文")
+        archive = context.sync.exporter.export(message, account="a@x.com")
+        assert archive is not None
+
+        attachment_root = context.config.attachment_path
+        attachment_root.mkdir(parents=True, exist_ok=True)
+        (attachment_root / "技术附件.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        result = context.backup_full(include_files=True)
+        assert result.files is not None
+        with zipfile.ZipFile(result.files) as zf:
+            names = zf.namelist()
+        assert any("技术附件.pdf" in n for n in names), (
+            f"附件没有被收进备份包：{names[:5]}"
+        )
 
     def test_backup_label(self, context: AppContext) -> None:
         path = context.backup(label="manual")

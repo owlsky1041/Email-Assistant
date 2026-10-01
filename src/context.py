@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import threading
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,24 @@ from .sync_service import SyncService
 from .vector_store import VectorStore, create_vector_store
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BackupResult:
+    """一次备份的产物。"""
+
+    #: 数据库快照（``VACUUM INTO`` 产物，永远是完整可用的 SQLite 文件）
+    db: Path
+    #: 归档目录 + 附件的压缩包；``None`` 表示这次只备了数据库
+    files: Path | None = None
+
+    @property
+    def complete(self) -> bool:
+        """是否包含文件。只有数据库的备份**无法恢复附件**。"""
+        return self.files is not None
+
+    def paths(self) -> list[Path]:
+        return [p for p in (self.db, self.files) if p is not None]
 
 
 class AppContext:
@@ -148,10 +167,31 @@ class AppContext:
     # 维护
     # ------------------------------------------------------------------
 
-    def backup(self, *, include_files: bool = False, label: str = "") -> Path:
-        """备份数据库（可选附带归档目录）。
+    def _backup_roots(self) -> list[Path]:
+        """需要打包进备份的目录。
 
-        §7 数据库备份功能：使用 ``VACUUM INTO``，可在 WAL 模式下安全热备。
+        ``attachment_layout: global`` 时附件落在 ``storage.attachment_dir``，
+        它**不在**归档目录下 —— 只打包 ``archive_path`` 会让这些附件
+        悄悄漏掉，而数据库里只有路径和 sha256，文件丢了就再也找不回来。
+        """
+        roots = [self.config.archive_path]
+        attachment = self.config.attachment_path
+        try:
+            inside = attachment.resolve().is_relative_to(self.config.archive_path.resolve())
+        except (OSError, ValueError):
+            inside = False
+        if not inside:
+            roots.append(attachment)
+        return [r for r in roots if r.is_dir()]
+
+    def backup_full(
+        self, *, include_files: bool = True, label: str = ""
+    ) -> "BackupResult":
+        """备份数据库，并按需一并打包归档目录与附件。
+
+        为什么默认要带文件：**附件只存在于磁盘上**。``attachments`` 表里
+        只有文件名、大小、sha256 和路径，没有字节。只留一份 ``mail.db``
+        等于把附件永久丢掉，而用户完全看不出来。
         """
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = f"_{label}" if label else ""
@@ -170,24 +210,62 @@ class AppContext:
         logger.info("数据库已备份至 %s", db_copy)
 
         if not include_files:
-            return db_copy
+            return BackupResult(db=db_copy, files=None)
 
         archive = target_dir / f"mail_archive_{stamp}{suffix}.zip"
+        roots = self._backup_roots()
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            for path in sorted(self.config.archive_path.rglob("*")):
-                if path.is_file():
-                    zf.write(path, path.relative_to(self.config.archive_path.parent))
-        logger.info("归档文件已打包至 %s", archive)
-        return archive
+            for root in roots:
+                for path in sorted(root.rglob("*")):
+                    if path.is_file():
+                        # 保留顶层目录名，恢复时能原样放回
+                        zf.write(path, path.relative_to(root.parent))
+        logger.info(
+            "归档与附件已打包至 %s（%d 个目录）", archive, len(roots)
+        )
+        return BackupResult(db=db_copy, files=archive)
+
+    def backup(self, *, include_files: bool = False, label: str = "") -> Path:
+        """备份数据库，返回**数据库**备份文件路径。
+
+        保留这个签名是为了向后兼容（定时维护等只需要一个廉价快照）。
+        需要归档文件时用 :meth:`backup_full`，或传 ``include_files=True``
+        —— 但请注意那时返回值仍然是 ``.db``，压缩包路径见
+        :attr:`BackupResult.files`。
+        """
+        return self.backup_full(include_files=include_files, label=label).db
 
     def restore(self, backup_file: str | Path) -> Path:
-        """从备份恢复数据库（覆盖当前库，先另存旧库）。"""
+        """从备份恢复数据库（覆盖当前库，先另存旧库）。
+
+        传进来的如果是 ``backup_full()`` 生成的压缩包，这里会自动改用
+        同目录下的数据库快照，并提示归档文件需要手工解压 —— 直接对 zip
+        跑 ``integrity_check`` 只会得到一句莫名其妙的报错。
+        """
         source = Path(backup_file)
+        if source.suffix.lower() == ".zip":
+            sibling = source.with_name(source.name.replace("mail_archive_", "mail_", 1))
+            sibling = sibling.with_suffix(".db")
+            hint = (
+                f"归档与附件在 {source.name} 里，需要手工解压回 "
+                f"{self.config.archive_path.parent}"
+            )
+            if not sibling.is_file():
+                raise ValueError(
+                    f"{source} 是归档压缩包，不是数据库备份。\n{hint}"
+                )
+            logger.info("传入的是归档压缩包，改用同目录的数据库快照：%s", sibling)
+            logger.info(hint)
+            source = sibling
+
         if not source.is_file():
             raise FileNotFoundError(f"备份文件不存在：{source}")
 
         # 校验备份可用
-        probe = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        try:
+            probe = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        except sqlite3.OperationalError as exc:
+            raise ValueError(f"{source} 不是有效的 SQLite 数据库：{exc}") from exc
         try:
             result = probe.execute("PRAGMA integrity_check").fetchone()
             if not result or result[0] != "ok":

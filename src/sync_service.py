@@ -150,6 +150,12 @@ class SyncService:
         overall = SyncResult(folder="*", started_at=utcnow())
         workers = max(1, int(self.config.sync.fetch_workers or 1))
         self._emit("run_start", {"workers": workers})
+        # 整个轮次共用一个下载池：连接在其中跨批次、跨文件夹复用。
+        fetch_pool = (
+            None
+            if workers <= 1
+            else _FetchPool(self.config, self._auth_code(), self.cancel, workers)
+        )
         try:
             with ImapClient(self.config, self._auth_code(), cancel_token=self.cancel) as client:
                 targets = self._resolve_folders(client, folders)
@@ -186,10 +192,18 @@ class SyncService:
                         index=index,
                         force_reconcile=full,
                         max_messages=budget,
+                        fetch_pool=fetch_pool,
                     )
                     consumed += result.archived + result.failed
                     overall.merge(result)
                     self._emit("folder_done", result.to_dict())
+
+            if fetch_pool is not None:
+                logger.info(
+                    "本轮并发下载共建立 %d 条 IMAP 连接（workers=%d）",
+                    fetch_pool.connections_created,
+                    workers,
+                )
 
             if index and self.index_service is not None:
                 self._emit("index_start", {"pending": self.index_service.count_pending()})
@@ -211,6 +225,8 @@ class SyncService:
             overall.error_summary = f"{type(exc).__name__}: {exc}"
             return overall
         finally:
+            if fetch_pool is not None:
+                fetch_pool.close()
             overall.finished_at = utcnow()
             self._last_result = overall
             self._running = False
@@ -226,12 +242,16 @@ class SyncService:
         index: bool = True,
         force_reconcile: bool = False,
         max_messages: int = 0,
+        fetch_pool: "_FetchPool | None" = None,
     ) -> SyncResult:
         """同步单个文件夹。
 
         :param index: 是否在本文件夹同步后立即建索引
         :param force_reconcile: 强制做全量 UID 比对（``--full`` 时启用）
         :param max_messages: 本轮允许处理的封数上限，0 表示用配置值
+        :param fetch_pool: 跨文件夹共享的下载线程池 + 连接池。由
+            :meth:`sync_all` 在整个轮次内传入，单独调用时为 ``None``
+            （本方法自建自关）。
         """
         result = SyncResult(folder=folder, started_at=utcnow())
         log_id = self.db.start_sync_log(self.account, folder)
@@ -298,11 +318,13 @@ class SyncService:
             truncated = False
 
             workers = max(1, int(self.config.sync.fetch_workers or 1))
-            pool: _ClientPool | None = None
-            if workers > 1:
-                # 每个工作线程需要**独立的 IMAP 连接**（imaplib 非线程安全），
-                # 因此另开一个连接池，而不是把主连接共享出去。
-                pool = _ClientPool(self.config, self._auth_code(), self.cancel)
+            # 连接池由调用方（sync_all）在整个轮次内共享；单独调用
+            # sync_folder 时自己建一个，退出时关掉。
+            owned_pool = fetch_pool is None and workers > 1
+            if owned_pool:
+                fetch_pool = _FetchPool(
+                    self.config, self._auth_code(), self.cancel, workers
+                )
 
             try:
                 for batch in _batched(new_uids, max(1, self.config.sync.fetch_batch_size)):
@@ -325,15 +347,14 @@ class SyncService:
 
                     sizes = client.fetch_sizes(allowed, folder=folder)
 
-                    if pool is not None and len(allowed) > 1:
+                    if fetch_pool is not None and len(allowed) > 1:
                         self._process_parallel(
-                            pool,
+                            fetch_pool,
                             folder=folder,
                             uidvalidity=uidvalidity,
                             uids=allowed,
                             sizes=sizes,
                             result=result,
-                            workers=min(workers, len(allowed)),
                         )
                     else:
                         for uid in allowed:
@@ -364,8 +385,8 @@ class SyncService:
                     if truncated:
                         break
             finally:
-                if pool is not None:
-                    pool.close_all()
+                if owned_pool and fetch_pool is not None:
+                    fetch_pool.close()
 
             if truncated:
                 result.skipped += max(0, len(new_uids) - processed)
@@ -437,18 +458,18 @@ class SyncService:
 
     def _process_parallel(
         self,
-        pool: "_ClientPool",
+        fetch_pool: "_FetchPool",
         *,
         folder: str,
         uidvalidity: int,
         uids: Sequence[str],
         sizes: dict[str, int],
         result: SyncResult,
-        workers: int,
     ) -> None:
         """并发下载一批邮件。
 
-        每个线程用自己的 IMAP 连接（imaplib 非线程安全）；
+        线程池与连接池都**由调用方持有并复用**（见 :class:`_FetchPool`）。
+        每个工作线程用自己的 IMAP 连接（imaplib 非线程安全）；
         数据库写入由 ``Database`` 内部的写锁串行化，WAL 模式下安全；
         文件写入互不重叠，可安全并发。
         """
@@ -456,7 +477,7 @@ class SyncService:
 
         def work(uid: str) -> None:
             try:
-                worker_client = pool.get()
+                worker_client = fetch_pool.client_pool.get()
             except Exception as exc:  # noqa: BLE001 - 建连失败不应拖垮整批
                 with counter_lock:
                     result.failed += 1
@@ -480,13 +501,17 @@ class SyncService:
                     {"folder": folder, "uid": uid, "archived": result.archived},
                 )
 
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="imap-fetch") as pool_exec:
-            futures = [pool_exec.submit(work, uid) for uid in uids]
-            for future in as_completed(futures):
-                self.cancel.raise_if_cancelled()
-                exc = future.exception()
-                if exc is not None and not isinstance(exc, CancelledError):
-                    logger.error("并发下载任务异常：%s", exc)
+        # 关键：**不**在这里创建/销毁线程池。每批次新建线程池会让
+        # threading.local() 上的连接随线程一起被丢弃，而连接池又要等整个
+        # 文件夹同步结束才统一关闭 —— 结果就是"每个批次新建 N 条连接，
+        # 旧连接既不释放也不复用"。实测 10,000 封邮件会建立约 3,537 条连接，
+        # 仅 TLS+LOGIN 握手就约 2.4 小时，还极易触发服务端的并发连接上限。
+        futures = [fetch_pool.executor.submit(work, uid) for uid in uids]
+        for future in as_completed(futures):
+            self.cancel.raise_if_cancelled()
+            exc = future.exception()
+            if exc is not None and not isinstance(exc, CancelledError):
+                logger.error("并发下载任务异常：%s", exc)
 
     def _process_one(
         self,
@@ -825,6 +850,9 @@ class _ClientPool:
         self._local = threading.local()
         self._all: list[ImapClient] = []
         self._lock = threading.Lock()
+        #: 累计建立过的连接数。只用于观测与测试断言：
+        #: 它必须约等于工作线程数，而不是随批次数量增长。
+        self.created = 0
 
     def get(self) -> ImapClient:
         client = getattr(self._local, "client", None)
@@ -834,6 +862,7 @@ class _ClientPool:
             self._local.client = client
             with self._lock:
                 self._all.append(client)
+                self.created += 1
             logger.debug("为线程 %s 建立独立 IMAP 连接", threading.current_thread().name)
         return client
 
@@ -845,6 +874,50 @@ class _ClientPool:
                 client.disconnect()
             except Exception:  # noqa: BLE001
                 logger.debug("关闭并发连接失败", exc_info=True)
+
+
+class _FetchPool:
+    """一次同步轮次内共享的「线程池 + IMAP 连接池」。
+
+    为什么必须共享而不是每批次新建
+    ------------------------------
+    连接挂在 ``threading.local()`` 上，只有**线程还活着**才会被复用。
+    早先每个批次都新建一个 ``ThreadPoolExecutor``，批次一结束线程就死，
+    连接随之失去复用可能；而 ``_ClientPool.close_all()`` 又要等整个文件夹
+    同步结束才调用，于是旧连接一直挂着不释放。实测 53 封邮件就建了 45 条
+    连接（约 2.8 条/批次），外推到 10,000 封是约 3,537 条，握手均值 2.44 秒，
+    仅握手就约 2.4 小时 —— 而且腾讯企业邮箱对单账号并发连接有限制。
+
+    共享之后：连接数 ≈ ``min(workers, 并发任务数)``，与批次数量无关，
+    并且跨文件夹复用（``ImapClient`` 自己缓存 ``_current_folder``，
+    切换文件夹只多一次 SELECT）。
+    """
+
+    def __init__(
+        self,
+        config: AppConfig,
+        auth_code: str,
+        cancel: CancellationToken,
+        workers: int,
+    ) -> None:
+        self.workers = max(1, int(workers))
+        self.client_pool = _ClientPool(config, auth_code, cancel)
+        self.executor = ThreadPoolExecutor(
+            max_workers=self.workers, thread_name_prefix="imap-fetch"
+        )
+        self._closed = False
+
+    @property
+    def connections_created(self) -> int:
+        return self.client_pool.created
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        # 先停线程再关连接：反过来的话，还在跑的线程会拿到已断开的连接。
+        self.executor.shutdown(wait=True)
+        self.client_pool.close_all()
 
 
 def _batched(items: Sequence[Any], size: int) -> Iterator[list[Any]]:

@@ -182,7 +182,7 @@ sync:
 | `serve [--host H] [--port P]` | 启动知识库 API |
 | `settings [--browser]` | 打开原生设置窗口（`--browser` 用网页设置页） |
 | `tray [--no-api]` | 托盘常驻 + 定时同步 + 通知 |
-| `backup [--with-files]` / `restore FILE` | 备份 / 恢复 |
+| `backup [--db-only]` / `restore FILE` | 备份 / 恢复（默认含归档与附件） |
 | `rebuild-fts` | 重建全文索引 |
 | `config [--show]` | 查看配置 |
 | `demo [--count N] [--reset]` | 生成演示数据（无需真实邮箱） |
@@ -481,6 +481,8 @@ email-assistant/
 | RRF 融合 | `reciprocal_rank_fusion()`：`score(d) = Σ w_r / (k + rank_r(d))`，`k=60`，无需分数归一化 |
 | 模型轻量化 | 优先 `onnxruntime`（约 200MB），避免完整 PyTorch |
 | 优雅退出 | `CancellationToken` 贯穿 IMAP 拉取、嵌入推理、批量入库；`install_signal_handlers()` 拦截 SIGINT/SIGTERM/SIGBREAK，确保事务提交与文件完整 |
+| 并发连接复用 | 整个同步轮次共享一个线程池 + IMAP 连接池，连接数 ≈ `workers` 且跨批次、跨文件夹复用（早先每批次新建线程池，10,000 封会建立约 3,537 条连接） |
+| 备份完整性 | `backup` 默认同时产出数据库快照与归档/附件压缩包；`attachment_layout=global` 时附件在归档目录之外，也一并收集 |
 
 ---
 

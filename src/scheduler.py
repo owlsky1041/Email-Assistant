@@ -196,8 +196,15 @@ class SyncScheduler:
         if self.cancel.cancelled:
             return
         try:
-            path = self.context.backup()
-            logger.info("每日备份完成：%s", path)
+            # 每日维护刻意只备数据库：归档可能有 GB 级附件，天天打包既慢
+            # 又会把备份盘撑满。它**无法**用来恢复附件，所以日志里写明，
+            # 免得用户误以为这就是一份完整备份。
+            path = self.context.backup(include_files=False)
+            logger.info(
+                "每日备份完成（仅数据库，不含附件）：%s；需要完整备份请执行 "
+                "`main.py backup`",
+                path,
+            )
             self.context.db.optimize()
             self._last_backup = utcnow()
         except Exception:  # noqa: BLE001
