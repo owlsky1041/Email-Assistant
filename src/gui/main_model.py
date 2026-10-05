@@ -156,6 +156,46 @@ def _latest_message_line(snapshot: dict[str, Any]) -> str:
 # ----------------------------------------------------------------------
 
 
+#: 结果表格各列的排序键。值是一个"从 SearchRow 取排序依据"的函数。
+SORT_KEYS: dict[str, Any] = {
+    "subject": lambda r: (r.subject or "").lower(),
+    "sender": lambda r: (r.sender or "").lower(),
+    "date": lambda r: r.date or "",
+    "score": lambda r: r.score,
+    "folder": lambda r: (r.folder or "").lower(),
+}
+
+
+def next_sort_state(
+    current_column: str, current_descending: bool, clicked: str
+) -> tuple[str, bool]:
+    """点击表头后应该用什么排序状态。
+
+    抽成纯函数是为了能无头测试 —— 这段判断写在窗口方法里时，
+    一个笔误（用了未定义的变量）只有真正点到表头才会炸。
+
+    :return: ``(列名, 是否降序)``
+    """
+    if clicked == current_column:
+        return clicked, not current_descending
+    # 新列：分数默认从高到低（谁最相关排最前），其余文本/时间列默认升序
+    return clicked, clicked == "score"
+
+
+def sort_rows(
+    rows: list["SearchRow"], column: str, *, descending: bool = False
+) -> list["SearchRow"]:
+    """按某一列排序。
+
+    日期与分数按**真实值**排（字符串排会把 2024-09 排到 2024-10 后面）；
+    文本列按小写排，避免大小写混排。
+    """
+    key = SORT_KEYS.get(column)
+    if key is None:
+        return list(rows)
+    return sorted(rows, key=key, reverse=descending)
+
+
 @dataclass
 class SearchRow:
     """结果表格里的一行。"""
@@ -184,12 +224,20 @@ def run_search(
     *,
     limit: int = 30,
     snippet_length: int = 200,
+    scope: str = "all",
 ) -> list[SearchRow]:
-    """执行检索并转成表格行。空查询直接返回空列表。"""
+    """执行检索并转成表格行。空查询直接返回空列表。
+
+    :param scope: 检索范围（``all`` / ``subject`` / ``sender`` /
+        ``recipient`` / ``cc`` / ``body``），见
+        :data:`src.search.SCOPE_LABELS`。
+    """
     text = (query or "").strip()
     if not text:
         return []
-    hits = context.search.search(text, limit=limit, snippet_length=snippet_length)
+    hits = context.search.search(
+        text, limit=limit, snippet_length=snippet_length, scope=scope
+    )
     return [
         SearchRow(
             message_id=hit.message_id,

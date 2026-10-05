@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from ..config import AppConfig, is_frozen
 from . import window_available
+from ..search import SCOPE_LABELS
 from .main_model import (
     AttachmentRow,
     DashboardView,
@@ -31,7 +32,9 @@ from .main_model import (
     corpus_stats,
     format_size,
     load_detail,
+    next_sort_state,
     run_search,
+    sort_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -251,6 +254,16 @@ class MainWindow:
         self.entry.bind("<Return>", lambda _e: self._on_search())
         self.search_btn = ttk.Button(row, text="检索", command=self._on_search)
         self.search_btn.pack(side="left", padx=(8, 0))
+
+        self.var_scope = tk.StringVar(value=SCOPE_LABELS["all"])
+        ttk.Label(row, text="范围").pack(side="left", padx=(10, 4))
+        scope_box = ttk.Combobox(
+            row, textvariable=self.var_scope, values=list(SCOPE_LABELS.values()),
+            width=14, state="readonly",
+        )
+        scope_box.pack(side="left")
+        scope_box.bind("<<ComboboxSelected>>", lambda _e: self._on_search())
+
         self.var_limit = tk.StringVar(value="30")
         ttk.Label(row, text="条数").pack(side="left", padx=(10, 4))
         ttk.Combobox(
@@ -266,13 +279,18 @@ class MainWindow:
         split.add(left, weight=3)
         columns = ("subject", "sender", "date", "score")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="browse")
+        # 表头可点击排序：点一次升序，再点一次降序
+        self._sort_column = "score"
+        self._sort_desc = True
         for key, title, width, anchor in (
             ("subject", "主题", 260, "w"),
             ("sender", "发件人", 150, "w"),
             ("date", "时间", 130, "w"),
             ("score", "分数", 60, "e"),
         ):
-            self.tree.heading(key, text=title)
+            self.tree.heading(
+                key, text=title, command=lambda k=key: self._on_sort(k)
+            )
             self.tree.column(key, width=width, anchor=anchor, stretch=(key == "subject"))
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -509,33 +527,61 @@ class MainWindow:
         except ValueError:
             limit = 30
 
+        scope = self._current_scope()
         self._set_busy("search", True, "正在检索…")
         self.tree.delete(*self.tree.get_children())
         self._rows = []
 
         def work() -> None:
             try:
-                rows = run_search(self.context, query, limit=limit)
+                rows = run_search(self.context, query, limit=limit, scope=scope)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("检索失败")
                 self._post(lambda: self._on_search_failed(exc))
                 return
-            self._post(lambda: self._on_search_done(rows, query))
+            self._post(lambda: self._on_search_done(rows, query, scope))
 
         threading.Thread(target=work, name="main-search", daemon=True).start()
 
     def _on_search_failed(self, exc: Exception) -> None:
         self._set_busy("search", False, f"检索失败：{exc}")
 
-    def _on_search_done(self, rows: list[SearchRow], query: str) -> None:
-        self._rows = rows
-        for index, row in enumerate(rows):
+    def _current_scope(self) -> str:
+        """界面上的中文范围标签 → 内部 scope 值。"""
+        label = self.var_scope.get()
+        for key, text in SCOPE_LABELS.items():
+            if text == label:
+                return key
+        return "all"
+
+    def _on_search_done(self, rows: list[SearchRow], query: str, scope: str = "all") -> None:
+        self._rows = sort_rows(rows, self._sort_column, descending=self._sort_desc)
+        self._render_rows()
+        where = "" if scope == "all" else f"（{SCOPE_LABELS.get(scope, scope)}）"
+        self._set_busy("search", False, f"「{query}」{where}命中 {len(rows)} 条")
+
+    def _render_rows(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for index, row in enumerate(self._rows):
             self.tree.insert("", "end", iid=str(index), values=row.to_tree_values())
-        self._set_busy("search", False, f"「{query}」命中 {len(rows)} 条")
-        if rows:
-            first = self.tree.get_children()[0]
-            self.tree.selection_set(first)
-            self.tree.focus(first)
+
+    def _on_sort(self, column: str) -> None:
+        """点击表头排序：同列再点一次切换升降序。"""
+        self._sort_column, self._sort_desc = next_sort_state(
+            self._sort_column, self._sort_desc, column
+        )
+        self._rows = sort_rows(self._rows, column, descending=self._sort_desc)
+        self._render_rows()
+        arrow = "↓" if self._sort_desc else "↑"
+        titles = {"subject": "主题", "sender": "发件人", "date": "时间", "score": "分数"}
+        self.status_label.configure(
+            text=f"按{titles.get(column, column)} {arrow} 排序", foreground="#555"
+        )
+        # 排序后保持选中第一行，右侧详情跟着更新
+        children = self.tree.get_children()
+        if children:
+            self.tree.selection_set(children[0])
+            self.tree.focus(children[0])
 
     def _on_select_result(self, _event: Any = None) -> None:
         selection = self.tree.selection()

@@ -517,7 +517,8 @@ def cmd_search(args: argparse.Namespace) -> int:
             has_attachments=args.has_attachments,
         )
         hits = context.search.search(
-            args.query, limit=args.limit, mode=args.mode, filters=filters
+            args.query, limit=args.limit, mode=args.mode, filters=filters,
+            scope=args.scope,
         )
         if args.json:
             _print_json([hit.to_dict() for hit in hits])
@@ -1182,6 +1183,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_search = sub.add_parser("search", help="检索邮件")
     p_search.add_argument("query", help="检索语句")
     p_search.add_argument("--mode", choices=["hybrid", "keyword", "vector"], default="hybrid")
+    p_search.add_argument(
+        "--scope",
+        choices=["all", "subject", "sender", "recipient", "cc", "body"],
+        default="all",
+        help="把查询限定在某个字段：all/subject/sender/recipient/cc/body",
+    )
     p_search.add_argument("--limit", type=int, default=10)
     p_search.add_argument("--folder", action="append", help="限定文件夹，可重复")
     p_search.add_argument("--sender", help="发件人包含")

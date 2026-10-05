@@ -19,6 +19,9 @@ import pytest
 from src.context import AppContext
 from src.gui.main_model import (
     MAX_BODY_CHARS,
+    SORT_KEYS,
+    next_sort_state,
+    sort_rows,
     AttachmentRow,
     DashboardView,
     SearchRow,
@@ -288,3 +291,101 @@ class TestAttachmentRow:
             content_type="application/pdf", local_path="/x/a.pdf", exists=True,
         )
         assert row.to_tree_values() == ("a.pdf", "2.0 KB", "✓")
+
+
+class TestSorting:
+    """结果表格点表头排序。
+
+    回归背景：用户要求标题等列可以升序/降序。日期与分数必须按**真实值**
+    排 —— 按字符串排会把 2024-09 排到 2024-10 之后。
+    """
+
+    def _rows(self) -> list[SearchRow]:
+        def make(mid: str, subject: str, sender: str, date: str, score: float) -> SearchRow:
+            return SearchRow(
+                message_id=mid, subject=subject, sender=sender, date=date,
+                folder="INBOX", score=score, snippet="", source="hybrid",
+            )
+
+        return [
+            make("a", "乙项目", "zoe@x.com", "2024-10-01T09:00:00+00:00", 0.01),
+            make("b", "甲项目", "alice@x.com", "2024-09-30T23:00:00+00:00", 0.03),
+            make("c", "丙项目", "bob@x.com", "2024-11-15T12:00:00+00:00", 0.02),
+        ]
+
+    # 三条数据的对应关系（别凭直觉记）：
+    #   a = "乙项目"(乙 U+4E59)   b = "甲项目"(甲 U+7532)   c = "丙项目"(丙 U+4E19)
+    # Python 的字符串比较是**码点序**，不是拼音序：
+    #   丙(4E19) < 乙(4E59) < 甲(7532)  →  c, a, b
+
+    def test_sort_by_subject_ascending(self) -> None:
+        rows = sort_rows(self._rows(), "subject")
+        assert [r.message_id for r in rows] == ["c", "a", "b"]
+
+    def test_sort_by_subject_descending(self) -> None:
+        rows = sort_rows(self._rows(), "subject", descending=True)
+        assert [r.message_id for r in rows] == ["b", "a", "c"]
+
+    def test_sort_by_date_uses_real_value(self) -> None:
+        """字符串排序会把 2024-09 排到 2024-10 之后，这里必须是时间序。"""
+        asc = [r.message_id for r in sort_rows(self._rows(), "date")]
+        assert asc == ["b", "a", "c"], asc
+
+    def test_sort_by_score(self) -> None:
+        asc = [r.message_id for r in sort_rows(self._rows(), "score")]
+        assert asc == ["a", "c", "b"]
+        desc = [r.message_id for r in sort_rows(self._rows(), "score", descending=True)]
+        assert desc == ["b", "c", "a"]
+
+    def test_sort_by_sender_is_case_insensitive(self) -> None:
+        rows = self._rows() + [
+            SearchRow(message_id="d", subject="丁", sender="Zed@x.com", date="2024-01-01",
+                      folder="INBOX", score=0.0, snippet="", source="hybrid")
+        ]
+        order = [r.message_id for r in sort_rows(rows, "sender")]
+        # 忽略大小写后：alice(b) < bob(c) < Zed(d) < zoe(a)
+        # 不忽略大小写的话大写 Z(0x5A) 会排到小写字母前面，顺序就乱了。
+        assert order == ["b", "c", "d", "a"], order
+
+    def test_unknown_column_is_noop(self) -> None:
+        rows = self._rows()
+        assert [r.message_id for r in sort_rows(rows, "不存在")] == [r.message_id for r in rows]
+
+    def test_sort_does_not_mutate_input(self) -> None:
+        rows = self._rows()
+        before = [r.message_id for r in rows]
+        sort_rows(rows, "subject")
+        assert [r.message_id for r in rows] == before
+
+    def test_every_tree_column_has_a_sort_key(self) -> None:
+        """表格里显示的列必须都能排序，否则点了没反应。"""
+        for column in ("subject", "sender", "date", "score"):
+            assert column in SORT_KEYS
+
+
+class TestSortToggle:
+    """点击表头时的升降序切换。
+
+    回归背景：这段判断原本写在窗口方法里，一个笔误（引用了未定义的变量）
+    直到真正点到表头才炸出来。抽成纯函数后可以无头覆盖。
+    """
+
+    def test_first_click_on_new_column_ascends(self) -> None:
+        assert next_sort_state("score", True, "subject") == ("subject", False)
+
+    def test_score_column_defaults_to_descending(self) -> None:
+        """分数是"越相关越靠前"，默认就该从高到低。"""
+        assert next_sort_state("subject", False, "score") == ("score", True)
+
+    def test_clicking_same_column_toggles(self) -> None:
+        assert next_sort_state("subject", False, "subject") == ("subject", True)
+        assert next_sort_state("subject", True, "subject") == ("subject", False)
+
+    def test_toggle_back_and_forth_is_stable(self) -> None:
+        state = ("date", False)
+        for _ in range(3):
+            state = next_sort_state(*state, "date")
+        assert state == ("date", True)
+
+    def test_switching_columns_resets_direction(self) -> None:
+        assert next_sort_state("subject", True, "date") == ("date", False)

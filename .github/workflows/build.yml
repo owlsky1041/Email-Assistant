@@ -127,6 +127,51 @@ jobs:
           print("目录选择框已弹出")
           try: root.destroy()
           except Exception: pass
+
+          # 4) 主窗口必须能真正构建出来并驱动一次检索 + 排序切换。
+          #    纯逻辑有单测覆盖，但"控件接线写错"（例如引用了未定义的变量）
+          #    只有把窗口真的建起来才会暴露。
+          import pathlib, tempfile
+          tmp = pathlib.Path(tempfile.mkdtemp())
+          os.environ["EMAIL_ASSISTANT_HOME"] = str(tmp)
+          from src.config import load_config_from_mapping
+          from src.context import AppContext
+          from src.gui.main_window import MainWindow
+
+          cfg = load_config_from_mapping({
+              "email": {"address": "t@c.com", "auth_code_env": "EA_CI_CODE"},
+              "storage": {k: str(tmp / k) for k in
+                          ("archive_dir", "attachment_dir", "sqlite_path",
+                           "chroma_dir", "backup_dir", "blob_dir")},
+              "log": {"dir": str(tmp / "logs"), "console": False, "level": "ERROR"},
+              "embedding": {"backend": "hashing", "dimension": 64},
+              "vector": {"backend": "sqlite-bruteforce"},
+          }, create_dirs=True)
+          os.environ["EA_CI_CODE"] = "ci-auth-code-0123456789"
+          ctx = AppContext(cfg, configure_logging=False)
+          win = MainWindow(ctx)
+
+          def pump(seconds=1.0):
+              end = time.time() + seconds
+              while time.time() < end:
+                  win.root.update()
+                  time.sleep(0.02)
+
+          win.var_query.set("测试")
+          win._on_search()
+          pump(2.0)
+          # 三个标签页都要能切换（日志页会读文件、概览页会刷新统计）
+          for index in (0, 1, 2):
+              win.notebook.select(index)
+              pump(0.4)
+          # 表头排序：点一次升序、再点一次降序，不能抛异常
+          win._on_sort("subject")
+          win._on_sort("subject")
+          win._on_sort("score")
+          pump(0.4)
+          win._on_close()
+          ctx.close()
+          print("GUI 冒烟通过：主窗口可构建、检索可驱动、排序可切换")
           PYGUI
 
       - name: 运行测试

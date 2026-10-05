@@ -305,3 +305,88 @@ class TestFallbackWithoutChunks:
         assert hits
         assert hits[0].chunk_id is None
         assert "关键词" in hits[0].snippet
+
+
+class TestFieldScopedSearch:
+    """字段级检索：把查询限定在标题/发件人/收件人/抄送/正文。
+
+    回归背景：用户要能自己选检索范围。关键是**字段之间不能串**——
+    "在抄送里找报销"不该命中"收件人里有报销"的邮件。
+    """
+
+    def _seed(self, context: AppContext) -> None:
+        from src.models import MessageRecord
+
+        rows = [
+            # uid, 主题, 发件人地址, 发件人姓名, 收件人, 抄送, 正文
+            ("1", "季度报销发票汇总", "alice@corp.com", "爱丽丝",
+             "me@corp.com", "boss@corp.com", "差旅报销内容"),
+            ("2", "服务器扩容申请", "bob@corp.com", "报销专员",
+             "finance@corp.com", "boss@corp.com", "扩容申请正文"),
+            ("3", "项目进度通报", "carol@corp.com", "卡罗尔",
+             "me@corp.com", "报销组@corp.com", "正文里提到报销"),
+            ("4", "邮件D", "dave@corp.com", "戴夫",
+             "报销科@corp.com", "other@corp.com", "无关正文"),
+        ]
+        for uid, subject, sender, name, to, cc, body in rows:
+            context.db.insert_message(
+                MessageRecord(
+                    account="t@c.com", message_id=f"{uid}@corp.com", uid=uid,
+                    uidvalidity=1, folder="INBOX", subject=subject, sender=sender,
+                    sender_name=name, recipients=to, cc=cc, body_text=body,
+                ),
+                [],
+            )
+
+    def _subjects(self, context: AppContext, query: str, scope: str) -> set[str]:
+        return {h.subject for h in context.search.search(query, limit=20, scope=scope)}
+
+    def test_subject_scope_ignores_body(self, context: AppContext) -> None:
+        self._seed(context)
+        found = self._subjects(context, "报销", "subject")
+        assert found == {"季度报销发票汇总"}, found
+
+    def test_sender_scope_matches_display_name_too(self, context: AppContext) -> None:
+        """发件人姓名（中文）也要能命中，不能只搜地址。"""
+        self._seed(context)
+        assert "服务器扩容申请" in self._subjects(context, "报销", "sender")
+
+    def test_recipient_scope_does_not_leak_into_cc(self, context: AppContext) -> None:
+        self._seed(context)
+        found = self._subjects(context, "报销", "recipient")
+        assert found == {"邮件D"}, f"收件人范围串到了抄送：{found}"
+
+    def test_cc_scope_does_not_leak_into_recipient(self, context: AppContext) -> None:
+        self._seed(context)
+        found = self._subjects(context, "报销", "cc")
+        assert found == {"项目进度通报"}, f"抄送范围串到了收件人：{found}"
+
+    def test_body_scope_searches_content(self, context: AppContext) -> None:
+        self._seed(context)
+        found = self._subjects(context, "报销", "body")
+        assert "季度报销发票汇总" in found
+        assert "服务器扩容申请" not in found, "正文范围不该命中发件人姓名"
+
+    def test_all_scope_searches_everything(self, context: AppContext) -> None:
+        self._seed(context)
+        found = self._subjects(context, "报销", "all")
+        assert len(found) >= 3
+
+    def test_recipient_by_address(self, context: AppContext) -> None:
+        self._seed(context)
+        assert "服务器扩容申请" in self._subjects(context, "finance", "recipient")
+
+    def test_empty_query_returns_nothing(self, context: AppContext) -> None:
+        self._seed(context)
+        for scope in ("subject", "sender", "recipient", "cc", "body"):
+            assert context.search.search("  ", limit=5, scope=scope) == []
+
+    def test_scope_respects_filters(self, context: AppContext) -> None:
+        """范围检索也要走通用过滤条件，不能绕开文件夹/账户限制。"""
+        from src.search import SearchFilters
+
+        self._seed(context)
+        hits = context.search.search(
+            "报销", limit=20, scope="all", filters=SearchFilters(folder=["不存在的文件夹"])
+        )
+        assert hits == []

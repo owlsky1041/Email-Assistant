@@ -37,6 +37,28 @@ SearchMode = Literal["hybrid", "keyword", "vector"]
 # 过滤条件
 # ---------------------------------------------------------------------------
 
+#: 字段级检索范围。``all`` 走原来的「关键词 + 向量」混合检索；
+#: 其余值把查询**限定在某个字段**内匹配。
+SearchScope = Literal["all", "subject", "sender", "recipient", "cc", "body"]
+
+SCOPE_LABELS: dict[str, str] = {
+    "all": "全部字段（混合检索）",
+    "subject": "标题",
+    "sender": "发件人",
+    "recipient": "收件人",
+    "cc": "抄送",
+    "body": "邮件内容",
+}
+
+#: 能直接用 ``messages_fts`` 列过滤的范围
+_FTS_COLUMN_SCOPE: dict[str, str] = {
+    "subject": "subject",
+    "sender": "sender",
+    "recipient": "recipients",
+}
+
+
+@dataclass
 @dataclass(slots=True)
 class SearchFilters:
     """检索过滤条件（§3.7）。"""
@@ -244,12 +266,21 @@ class SearchEngine:
         mode: SearchMode = "hybrid",
         filters: SearchFilters | None = None,
         snippet_length: int | None = None,
+        scope: SearchScope = "all",
     ) -> list[SearchHit]:
         cfg = self.config.search
         limit = limit or cfg.default_limit
         filters = filters or SearchFilters()
         snippet_length = snippet_length or cfg.snippet_length
         candidate_pool = max(limit * cfg.candidate_multiplier, limit)
+
+        if scope != "all":
+            # 字段级检索只做**关键词匹配**：向量索引建在切片正文上，
+            # 拿它去匹配"发件人"这类元数据字段没有意义，硬做只会给出
+            # 看似相关实则无关的结果。
+            return self._field_scoped_search(
+                query, scope, filters, limit, snippet_length
+            )
 
         candidates: dict[int, _Candidate] = {}
         rankings: dict[str, list[int]] = {}
@@ -293,6 +324,173 @@ class SearchEngine:
             if hit is not None:
                 hits.append(hit)
         return hits
+
+    # ------------------------------------------------------------------
+    # 字段级检索
+    # ------------------------------------------------------------------
+
+    def _field_scoped_search(
+        self,
+        query: str,
+        scope: SearchScope,
+        filters: SearchFilters,
+        limit: int,
+        snippet_length: int,
+    ) -> list[SearchHit]:
+        """把查询限定在某个字段内匹配。
+
+        * 标题 / 发件人 / 收件人 → ``messages_fts`` 的**列过滤**
+          （``subject : ("发 票" AND "报 销")``），保留 FTS 的排序能力；
+        * 邮件内容 → ``chunks_fts``（正文切片就是它的匹配目标）；
+        * **抄送没有单独建索引**，走 ``messages.cc`` 的 LIKE。
+          为一个字段重建全部 FTS 需要迁移用户已有的上万封库，
+          对一个"偶尔用用"的筛选条件不值得冒这个险。
+        """
+        text = (query or "").strip()
+        if not text:
+            return []
+        if not self.db.fts_available and scope != "cc":
+            return self._field_like_fallback(text, scope, filters, limit, snippet_length)
+
+        variants = build_match_query_variants(text) or [build_match_query(text)]
+        variants = [v for v in variants if v]
+        if not variants:
+            return self._field_like_fallback(text, scope, filters, limit, snippet_length)
+
+        candidates: dict[int, _Candidate] = {}
+        for match_expr in variants:
+            keyword_ranking = self._field_channel(
+                match_expr, scope, limit, filters, candidates
+            )
+            if keyword_ranking:
+                if match_expr != variants[0]:
+                    logger.debug("字段检索使用放宽表达式：%s", match_expr)
+                break
+
+        if not candidates:
+            return self._field_like_fallback(text, scope, filters, limit, snippet_length)
+
+        ordered = sorted(
+            candidates.values(),
+            key=lambda c: (c.keyword_rank if c.keyword_rank is not None else 10**9),
+        )[:limit]
+        hits: list[SearchHit] = []
+        for candidate in ordered:
+            hit = self._hydrate(candidate, 1.0, text, snippet_length, "keyword")
+            if hit is not None:
+                hits.append(hit)
+        return hits
+
+    def _field_channel(
+        self,
+        match_expr: str,
+        scope: SearchScope,
+        pool: int,
+        filters: SearchFilters,
+        candidates: dict[int, _Candidate],
+    ) -> list[int]:
+        if scope == "cc":
+            rows = self._field_cc_rows(match_expr_source=match_expr, pool=pool, filters=filters)
+            return self._collect_message_rows(rows, candidates, channel="keyword")
+
+        if scope == "body":
+            rows = self._keyword_chunks(match_expr, pool, filters)
+            return self._collect_chunk_rows(rows, candidates, channel="keyword")
+
+        column = _FTS_COLUMN_SCOPE.get(scope)
+        if column is None:
+            return []
+        # FTS5 列过滤：`col : (expr)`。整段 expr 必须放在括号里，
+        # 否则 `subject : "a" AND "b"` 会被解析成 `(subject:a) AND (b)` ——
+        # "b" 就跑到别的字段去了。
+        scoped = f"{column} : ({match_expr})"
+        rows = self._keyword_messages(scoped, pool, filters)
+        if rows:
+            return self._collect_message_rows(rows, candidates, channel="keyword")
+
+        # messages_fts 只覆盖"发件人地址 + 收件人"，发件人姓名在 m.sender_name，
+        # 收件人里也常只有地址；补一次 LIKE 兜住中文姓名。
+        like_column = {"sender": ("m.sender_name", "m.sender"),
+                       "recipient": ("m.recipients",),
+                       "subject": ("m.subject",)}[scope]
+        return self._collect_message_rows(
+            self._field_like_rows(match_expr, like_column, pool, filters, scope),
+            candidates,
+            channel="keyword",
+        )
+
+    def _field_like_fallback(
+        self,
+        query: str,
+        scope: SearchScope,
+        filters: SearchFilters,
+        limit: int,
+        snippet_length: int,
+    ) -> list[SearchHit]:
+        """FTS 不可用（或抄送字段）时的 LIKE 路径。"""
+        columns = {
+            "subject": ("m.subject",),
+            "sender": ("m.sender", "m.sender_name"),
+            "recipient": ("m.recipients",),
+            "cc": ("m.cc",),
+            "body": ("m.body_text",),
+        }.get(scope)
+        if not columns:
+            return []
+
+        rows = self._field_like_rows_query(query, columns, limit, filters)
+        candidates: dict[int, _Candidate] = {}
+        self._collect_message_rows(rows, candidates, channel="keyword")
+        hits: list[SearchHit] = []
+        for candidate in candidates.values():
+            hit = self._hydrate(candidate, 1.0, query, snippet_length, "keyword")
+            if hit is not None:
+                hits.append(hit)
+        return hits
+
+    def _field_like_rows_query(
+        self, query: str, columns: Sequence[str], pool: int, filters: SearchFilters
+    ) -> list[Any]:
+        terms = [t for t in _TERM_SPLIT_RE.split(query or "") if t][:5]
+        if not terms:
+            return []
+        where_sql, params = build_message_where(filters)
+        clauses = []
+        like_params: list[Any] = []
+        for term in terms:
+            ors = " OR ".join(f"{col} LIKE ?" for col in columns)
+            clauses.append(f"({ors})")
+            like_params.extend([f"%{term}%"] * len(columns))
+        sql = f"""
+            SELECT m.id AS message_pk, 0.0 AS score
+            FROM messages m
+            WHERE {where_sql} AND {' AND '.join(clauses)}
+            ORDER BY m.date_utc DESC
+            LIMIT ?
+        """
+        return self.db.query(sql, [*params, *like_params, pool])
+
+    def _field_cc_rows(
+        self, *, match_expr_source: str, pool: int, filters: SearchFilters
+    ) -> list[Any]:
+        terms = [t for t in _TERM_SPLIT_RE.split(match_expr_source or "") if t][:5]
+        return self._field_like_rows_query(
+            " ".join(terms), ("m.cc",), pool, filters
+        ) if terms else []
+
+    def _field_like_rows(
+        self,
+        match_expr: str,
+        columns: Sequence[str],
+        pool: int,
+        filters: SearchFilters,
+        scope: SearchScope,
+    ) -> list[Any]:
+        terms = [t for t in _TERM_SPLIT_RE.split(match_expr or "") if t][:5]
+        # match_expr 里带引号与 AND，先剥成裸词再 LIKE
+        terms = [t.strip('"*() ') for t in terms]
+        terms = [t for t in terms if t and t.upper() != "AND"]
+        return self._field_like_rows_query(" ".join(terms), columns, pool, filters) if terms else []
 
     # ------------------------------------------------------------------
     # 关键词通道
