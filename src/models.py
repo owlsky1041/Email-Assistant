@@ -235,6 +235,9 @@ class SyncResult:
     deleted: int = 0
     #: 附件命中内容去重、用硬链接复用而非重复写盘的个数
     attachments_reused: int = 0
+    #: 同步失败的文件夹名。与整轮失败（error_summary）区分开：
+    #: 个别文件夹出问题不该让整轮显示成"失败"。
+    failed_folders: list[str] = field(default_factory=list)
     new_message_ids: list[str] = field(default_factory=list)
     error_summary: str | None = None
     started_at: datetime | None = None
@@ -247,6 +250,7 @@ class SyncResult:
         self.failed += other.failed
         self.deleted += other.deleted
         self.attachments_reused += other.attachments_reused
+        self.failed_folders.extend(other.failed_folders)
         self.new_message_ids.extend(other.new_message_ids)
         if other.error_summary:
             self.error_summary = (
@@ -257,6 +261,10 @@ class SyncResult:
 
     @property
     def status(self) -> str:
+        # 只有个别文件夹失败、本轮其余部分正常走完 → partial，不是 failed。
+        # 否则"49 个文件夹里 1 个容器文件夹服务端不认"会被显示成整轮失败。
+        if self.failed_folders and self.failed == 0:
+            return "partial"
         if self.failed == 0 and not self.error_summary:
             return "success"
         if self.archived or self.skipped:
@@ -273,6 +281,7 @@ class SyncResult:
             "failed": self.failed,
             "deleted": self.deleted,
             "attachments_reused": self.attachments_reused,
+            "failed_folders": list(self.failed_folders),
             "new_messages": len(self.new_message_ids),
             "error_summary": self.error_summary,
             "started_at": self.started_at.isoformat() if self.started_at else None,

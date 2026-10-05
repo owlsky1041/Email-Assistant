@@ -171,6 +171,8 @@ class SyncService:
 
                 total_limit = self.config.sync.max_messages_per_run
                 consumed = 0
+                #: 本轮同步失败的文件夹名（不影响其余文件夹继续处理）
+                failed_folders: list[str] = []
 
                 for index_no, folder in enumerate(targets, start=1):
                     self.cancel.raise_if_cancelled()
@@ -191,15 +193,30 @@ class SyncService:
                         "folder_start",
                         {"folder": folder, "index": index_no, "total": len(targets)},
                     )
-                    result = self.sync_folder(
-                        client,
-                        folder,
-                        full=full,
-                        index=index,
-                        force_reconcile=full,
-                        max_messages=budget,
-                        fetch_pool=fetch_pool,
-                    )
+                    # **单个文件夹的失败不能拖垮整轮同步**：49 个文件夹里
+                    # 有一个服务端行为异常（例如容器文件夹 SEARCH 回 NO），
+                    # 以前会让整轮判为 failed、其余文件夹全部不处理。
+                    try:
+                        result = self.sync_folder(
+                            client,
+                            folder,
+                            full=full,
+                            index=index,
+                            force_reconcile=full,
+                            max_messages=budget,
+                            fetch_pool=fetch_pool,
+                        )
+                    except CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "文件夹 %s 同步失败，跳过并继续其余文件夹：%s", folder, exc
+                        )
+                        result = SyncResult(folder=folder, started_at=utcnow())
+                        result.finished_at = utcnow()
+                        result.error_summary = f"{type(exc).__name__}: {exc}"
+                        result.failed_folders = [folder]
+                        failed_folders.append(folder)
                     consumed += result.archived + result.failed
                     overall.merge(result)
                     self._emit("folder_done", result.to_dict())
@@ -210,6 +227,14 @@ class SyncService:
                     fetch_pool.connections_created,
                     workers,
                 )
+
+            if failed_folders:
+                overall.error_summary = (
+                    f"{len(failed_folders)} 个文件夹同步失败（其余已正常处理）："
+                    + "、".join(failed_folders[:5])
+                    + ("…" if len(failed_folders) > 5 else "")
+                )
+                logger.warning(overall.error_summary)
 
             if index and self.index_service is not None:
                 self._emit("index_start", {"pending": self.index_service.count_pending()})
@@ -292,7 +317,13 @@ class SyncService:
             )
 
             # ---- 检索目标 UID ----
-            if full or state.last_uid <= 0:
+            # 服务端报告 0 封时**根本不要发 SEARCH**：腾讯企业邮箱的层级容器
+            # 文件夹（如「其他文件夹」本身）SELECT 会成功，但 `UID SEARCH ALL`
+            # 直接回 NO。以前这会抛 ImapError 并把**整轮同步**判为失败。
+            if int(status.get("MESSAGES", 0)) <= 0:
+                remote_uids = []
+                logger.debug("文件夹 %s 为空，跳过检索", folder)
+            elif full or state.last_uid <= 0:
                 remote_uids = client.search_uids("ALL", folder=folder)
             else:
                 remote_uids = client.search_uids_since(state.last_uid, folder=folder)
@@ -450,9 +481,13 @@ class SyncService:
         except ImapError as exc:
             logger.error("文件夹 %s 同步失败：%s", folder, exc)
             result.error_summary = str(exc)
+            # 标记为**文件夹级**失败：调用方据此把它算成 partial 而不是
+            # 整轮 failed，其余文件夹继续处理。
+            result.failed_folders = [folder]
         except Exception as exc:  # noqa: BLE001
             logger.exception("文件夹 %s 同步出现未预期错误", folder)
             result.error_summary = f"{type(exc).__name__}: {exc}"
+            result.failed_folders = [folder]
         finally:
             result.finished_at = utcnow()
             self.db.finish_sync_log(log_id, result)

@@ -47,6 +47,7 @@ PHASE_LABELS: dict[str, str] = {
     "fetching": "正在同步邮件",
     "indexing": "正在建立索引",
     "done": "已完成",
+    "partial": "部分完成（个别文件夹失败）",
     "error": "出错",
 }
 

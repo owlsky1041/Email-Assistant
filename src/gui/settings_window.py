@@ -756,7 +756,12 @@ def settings_command(config_path: str | None = None) -> list[str]:
     if config_path:
         prefix = ["--config", str(config_path)]
     if is_frozen():
-        # 打包后 sys.executable 就是本程序，直接复用自身的子命令
+        # 打包后优先用**无控制台**的孪生程序，否则在 Windows 上会闪出黑终端
+        from . import windowed_command
+
+        twin = windowed_command([*prefix, "_settings-gui"])
+        if twin is not None:
+            return twin
         return [sys.executable, *prefix, "_settings-gui"]
     # 源码运行：main.py 在**源码树根**，不是运行根目录（后者会随
     # EMAIL_ASSISTANT_HOME 变化，用它拼路径会永远找不到 main.py）

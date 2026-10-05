@@ -153,7 +153,13 @@ class SyncProgress:
 
     def _finish(self, payload: dict[str, Any]) -> None:
         self.running = False
-        self.phase = "done" if not payload.get("error_summary") else "error"
+        # partial = 个别文件夹失败但其余正常，不该显示成刺眼的"出错"
+        if payload.get("status") == "success":
+            self.phase = "done"
+        elif payload.get("status") == "partial":
+            self.phase = "partial"
+        else:
+            self.phase = "error"
         self.finished_at = utcnow()
         self.current_folder = ""
         self.last_result = payload or None

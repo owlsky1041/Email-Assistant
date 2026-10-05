@@ -416,15 +416,76 @@ class TestErrorIsolation:
         statuses = {log["folder"]: log["status"] for log in logs}
         assert statuses["INBOX"] == "partial"
 
-    def test_whole_folder_failure_captured(self, context: AppContext, patch_imap) -> None:
+    def test_whole_folder_failure_is_isolated(self, context: AppContext, patch_imap) -> None:
+        """单个文件夹整体失败时，其余文件夹仍要正常处理完。
+
+        以前这里会让整轮判为 failed —— 实测中「49 个文件夹里 1 个容器文件夹
+        服务端 SEARCH 回 NO」就让用户看到整轮同步失败、其余文件夹全部不处理。
+        """
         class Broken(FakeImapClient):
             def search_uids(self, criteria="ALL", *, folder=None):
                 raise RuntimeError("模拟搜索失败")
 
-        patch_imap(Broken({"INBOX": {}}))
+        # 必须是非空文件夹：空文件夹现在压根不会发 SEARCH
+        mailbox = {"INBOX": {"1": build_eml(subject="甲", text="甲", message_id="<a@x>")}}
+        patch_imap(Broken(mailbox))
         result = context.sync.sync_all()
-        assert result.status == "failed"
+
         assert "模拟搜索失败" in (result.error_summary or "")
+        assert result.failed_folders == ["INBOX"]
+        # 只有个别文件夹失败 → partial，而不是整轮 failed
+        assert result.status == "partial"
+
+    def test_container_folder_without_search_does_not_fail_run(
+        self, context: AppContext, patch_imap
+    ) -> None:
+        """回归：0 封的容器文件夹 SEARCH 回 NO，不该拖垮整轮同步。
+
+        腾讯企业邮箱的层级容器（如「其他文件夹」本身）SELECT 会成功，
+        但 `UID SEARCH ALL` 直接返回 NO。此前这会让整轮同步失败。
+        """
+        container = "其他文件夹"
+
+        class ContainerRejectsSearch(FakeImapClient):
+            def search_uids(self, criteria="ALL", *, folder=None):
+                if folder == container:
+                    raise RuntimeError('Response status "OK" expected, but "NO" received')
+                return super().search_uids(criteria, folder=folder)
+
+        mailbox = {
+            container: {},  # 空容器
+            "INBOX": {
+                str(i): build_eml(
+                    subject=f"第 {i} 封", text="正文", message_id=f"<m{i}@x>"
+                )
+                for i in range(1, 4)
+            },
+        }
+        patch_imap(ContainerRejectsSearch(mailbox))
+        result = context.sync.sync_all()
+
+        assert result.status == "success", "空容器不该影响结果"
+        assert result.archived == 3, "其余文件夹必须照常归档"
+
+    def test_empty_folder_skips_search_entirely(
+        self, context: AppContext, patch_imap
+    ) -> None:
+        """服务端说 0 封时，连 SEARCH 都不该发（省一次往返，也避开 NO）。"""
+        calls: list[tuple] = []
+
+        class Recording(FakeImapClient):
+            def search_uids(self, criteria="ALL", *, folder=None):
+                calls.append((folder, criteria))
+                return super().search_uids(criteria, folder=folder)
+
+        mailbox = {"INBOX": {"1": build_eml(subject="甲", text="甲", message_id="<a@x>")},
+                   "空盒子": {}}
+        patch_imap(Recording(mailbox))
+        context.sync.sync_all()
+
+        assert not any(folder == "空盒子" for folder, _ in calls), (
+            f"空文件夹不该发 SEARCH，实际调用：{calls}"
+        )
 
 
 class TestFolderSelection:

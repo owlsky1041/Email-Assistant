@@ -82,6 +82,7 @@ class MainWindow:
         self._rows: list[SearchRow] = []
         self._attachments: list[AttachmentRow] = []
         self._last_snapshot_sig = ""
+        self._folder_rows = -1
 
         self.root = tk.Tk()
         self.root.title(WINDOW_TITLE)
@@ -103,6 +104,7 @@ class MainWindow:
         self._center()
         self.root.after(POLL_INTERVAL_MS, self._pump)
         self._refresh_stats()
+        self._refresh_log()
         if autosync:
             self.root.after(400, self._on_sync)
 
@@ -114,72 +116,95 @@ class MainWindow:
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill="both", expand=True)
 
-        self._build_dashboard(outer)
+        # 常驻的细进度条：切到任何标签页都能看到同步状态
+        self._build_status_strip(outer)
 
-        ttk.Separator(outer).pack(fill="x", pady=(8, 8))
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.pack(fill="both", expand=True, pady=(8, 6))
 
-        self._build_search(outer)
+        tab_overview = ttk.Frame(self.notebook, padding=10)
+        tab_search = ttk.Frame(self.notebook, padding=10)
+        tab_log = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab_overview, text="  概览  ")
+        self.notebook.add(tab_search, text="  检索  ")
+        self.notebook.add(tab_log, text="  日志  ")
+
+        self._build_dashboard(tab_overview)
+        self._build_search(tab_search)
+        self._build_log(tab_log)
+
+        # 切到日志页时立刻刷新一次：不然首次打开是空白的，
+        # 用户以为"没有日志"，其实是没触发刷新。
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        self.status_label = ttk.Label(outer, text="", foreground="#555")
+        self.status_label.pack(anchor="w")
+
+    # ---- 常驻状态条 ----
+
+    def _build_status_strip(self, parent: ttk.Frame) -> None:
+        box = ttk.LabelFrame(parent, text="同步", padding=(10, 6))
+        box.pack(fill="x")
+
+        top = ttk.Frame(box)
+        top.pack(fill="x")
+        self.var_phase = tk.StringVar(value="空闲")
+        self.var_percent = tk.StringVar(value="0%")
+        ttk.Label(top, textvariable=self.var_phase, font=("TkDefaultFont", 10, "bold")).pack(
+            side="left"
+        )
+        self.var_folder = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.var_folder, foreground="#666").pack(
+            side="left", padx=(10, 0)
+        )
+        ttk.Label(top, textvariable=self.var_percent, foreground="#666").pack(side="right")
+
+        self.progress = ttk.Progressbar(box, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=(4, 2))
+
+        # 正在处理的邮件 —— 这一行是需求里最要紧的"正在同步的邮件状态"
+        self.var_current = tk.StringVar(value="尚未同步")
+        ttk.Label(box, textvariable=self.var_current, foreground="#0a4d8c",
+                  wraplength=980, justify="left").pack(anchor="w")
 
     # ---- 状态面板 ----
 
     def _build_dashboard(self, parent: ttk.Frame) -> None:
-        box = ttk.LabelFrame(parent, text="同步状态", padding=10)
+        box = ttk.LabelFrame(parent, text="语料规模", padding=10)
         box.pack(fill="x")
 
-        # 第一行：语料规模
         stats = ttk.Frame(box)
         stats.pack(fill="x")
         self.var_messages = tk.StringVar(value="0")
         self.var_chunks = tk.StringVar(value="0")
         self.var_vectors = tk.StringVar(value="0")
         self.var_pending = tk.StringVar(value="0")
-        for label, var, tip in (
-            ("邮件总数", self.var_messages, "封"),
-            ("切片", self.var_chunks, "个"),
-            ("向量", self.var_vectors, "条"),
-            ("待索引", self.var_pending, "封"),
+        for label, var in (
+            ("邮件总数", self.var_messages),
+            ("切片", self.var_chunks),
+            ("向量", self.var_vectors),
+            ("待索引", self.var_pending),
         ):
             cell = ttk.Frame(stats)
-            cell.pack(side="left", padx=(0, 28))
+            cell.pack(side="left", padx=(0, 32))
             ttk.Label(cell, text=label, foreground="#666").pack(anchor="w")
-            ttk.Label(cell, textvariable=var, font=("TkDefaultFont", 15, "bold")).pack(anchor="w")
+            ttk.Label(cell, textvariable=var, font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
 
-        # 第二行：运行状态 + 进度条
-        line = ttk.Frame(box)
-        line.pack(fill="x", pady=(10, 0))
-        self.var_phase = tk.StringVar(value="空闲")
-        self.var_folder = tk.StringVar(value="")
-        ttk.Label(line, textvariable=self.var_phase).pack(side="left")
-        ttk.Label(line, textvariable=self.var_folder, foreground="#666").pack(
-            side="left", padx=(10, 0)
-        )
-
-        bar = ttk.Frame(box)
-        bar.pack(fill="x", pady=(6, 0))
-        self.progress = ttk.Progressbar(bar, mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True)
-        self.var_percent = tk.StringVar(value="0%")
-        ttk.Label(bar, textvariable=self.var_percent, width=8, anchor="e").pack(
-            side="left", padx=(8, 0)
-        )
-
-        # 第三行：正在处理的邮件
-        self.var_current = tk.StringVar(value="尚未同步")
-        ttk.Label(box, textvariable=self.var_current, foreground="#0a4d8c",
-                  wraplength=880, justify="left").pack(anchor="w", pady=(8, 0))
-
-        # 第四行：速率与计数
-        detail = ttk.Frame(box)
-        detail.pack(fill="x", pady=(4, 0))
+        counters = ttk.Frame(parent)
+        counters.pack(fill="x", pady=(12, 0))
         self.var_rate = tk.StringVar(value="速率 —")
         self.var_eta = tk.StringVar(value="剩余 —")
+        self.var_elapsed = tk.StringVar(value="耗时 —")
         self.var_counters = tk.StringVar(value="")
-        for var in (self.var_rate, self.var_eta, self.var_counters):
-            ttk.Label(detail, textvariable=var, foreground="#666").pack(side="left", padx=(0, 20))
+        self.var_workers = tk.StringVar(value="")
+        for var, pad in (
+            (self.var_rate, 0), (self.var_eta, 16), (self.var_elapsed, 16),
+            (self.var_counters, 16), (self.var_workers, 16),
+        ):
+            ttk.Label(counters, textvariable=var, foreground="#666").pack(side="left", padx=(pad, 0))
 
-        # 第五行：操作按钮
-        actions = ttk.Frame(box)
-        actions.pack(fill="x", pady=(10, 0))
+        actions = ttk.LabelFrame(parent, text="操作", padding=10)
+        actions.pack(fill="x", pady=(12, 0))
         self.sync_btn = ttk.Button(actions, text="立即同步", command=self._on_sync)
         self.sync_btn.pack(side="left")
         self.full_btn = ttk.Button(actions, text="全量重扫", command=lambda: self._on_sync(full=True))
@@ -189,11 +214,28 @@ class MainWindow:
         ttk.Button(actions, text="打开归档目录", command=self._on_open_archive).pack(
             side="left", padx=(6, 0)
         )
+        ttk.Button(actions, text="数据目录…", command=self._on_show_where).pack(
+            side="left", padx=(6, 0)
+        )
         ttk.Button(actions, text="设置…", command=self._on_open_settings).pack(
             side="left", padx=(6, 0)
         )
-        self.status_label = ttk.Label(actions, text="", foreground="#555")
-        self.status_label.pack(side="right")
+
+        # 各文件夹结果：让用户看到"哪个文件夹出了什么问题"
+        folders_box = ttk.LabelFrame(parent, text="各文件夹结果（最近一轮）", padding=10)
+        folders_box.pack(fill="both", expand=True, pady=(12, 0))
+        self.folder_tree = ttk.Treeview(
+            folders_box,
+            columns=("folder", "status", "archived", "failed", "note"),
+            show="headings", height=6,
+        )
+        for key, title, width in (
+            ("folder", "文件夹", 200), ("status", "状态", 70),
+            ("archived", "归档", 60), ("failed", "失败", 60), ("note", "说明", 380),
+        ):
+            self.folder_tree.heading(key, text=title)
+            self.folder_tree.column(key, width=width, anchor="w", stretch=(key == "note"))
+        self.folder_tree.pack(fill="both", expand=True)
 
     # ---- 检索 ----
 
@@ -247,11 +289,24 @@ class MainWindow:
         ttk.Label(right, textvariable=self.var_detail_title, font=("TkDefaultFont", 11, "bold"),
                   wraplength=460, justify="left").pack(anchor="w")
 
-        self.var_detail_meta = tk.StringVar(value="")
-        ttk.Label(right, textvariable=self.var_detail_meta, foreground="#666",
-                  wraplength=460, justify="left").pack(anchor="w", pady=(4, 6))
+        # 头部（收发件人 / 抄送 …）放在**固定高度的只读文本**里，自带滚动条。
+        # 早先用 Label + wraplength：收件人一多，Label 能长到几百像素，
+        # 把下面的正文整块挤出可视区 —— 用户就"看不到正文"了。
+        header_box = ttk.Frame(right)
+        header_box.pack(fill="x", pady=(4, 6))
+        self.header_text = tk.Text(
+            header_box, height=5, wrap="word", relief="flat",
+            background=self.root.cget("background"), foreground="#555",
+            borderwidth=0, highlightthickness=0,
+        )
+        header_scroll = ttk.Scrollbar(header_box, orient="vertical", command=self.header_text.yview)
+        self.header_text.configure(yscrollcommand=header_scroll.set)
+        self.header_text.pack(side="left", fill="x", expand=True)
+        header_scroll.pack(side="right", fill="y")
+        self.header_text.configure(state="disabled")
 
         body_box = ttk.Frame(right)
+        # 正文至少给 8 行；窗口再小也不会被头部挤没
         body_box.pack(fill="both", expand=True)
         self.body_text = tk.Text(body_box, wrap="word", height=12, relief="solid", borderwidth=1)
         body_scroll = ttk.Scrollbar(body_box, orient="vertical", command=self.body_text.yview)
@@ -319,28 +374,54 @@ class MainWindow:
             return
         view = DashboardView.from_snapshot(snapshot)
         self._apply_view(view)
+        self._apply_folder_results(snapshot)
 
         # 同步刚结束：计数需要刷新
         sig = f"{snapshot.get('running')}:{snapshot.get('finished_at')}"
         if sig != self._last_snapshot_sig:
             self._last_snapshot_sig = sig
+            self._refresh_stats()
             if not snapshot.get("running"):
-                self._refresh_stats()
                 self._set_busy("sync", False)
+            # 事件数变化时刷新日志页，切过去就是最新的
+            if hasattr(self, "log_text") and self.notebook.index("current") == 2:
+                self._refresh_log()
 
     def _apply_view(self, view: DashboardView) -> None:
         self.var_phase.set(f"状态：{view.phase_label}")
         self.var_folder.set(view.folders_progress)
         self.progress.configure(value=min(100.0, max(0.0, view.percent)))
-        self.var_percent.set(f"{view.percent:.0f}%")
-        if view.total:
-            self.var_percent.set(f"{view.processed}/{view.total}")
+        self.var_percent.set(
+            f"{view.processed}/{view.total}" if view.total else f"{view.percent:.0f}%"
+        )
         self.var_current.set(view.current_message or ("尚未同步" if not view.running else "准备中…"))
         self.var_rate.set(f"速率 {view.rate_text}")
         self.var_eta.set(f"剩余 {view.eta_text}")
+        self.var_elapsed.set(f"耗时 {view.elapsed_text}")
         self.var_counters.set(view.counters_text)
+        self.var_workers.set(f"并发 {view.workers}")
         if view.last_error:
-            self.status_label.configure(text=f"最近错误：{view.last_error[:60]}", foreground="#b00020")
+            self.status_label.configure(
+                text=f"最近错误：{view.last_error[:90]}", foreground="#b00020"
+            )
+
+    def _apply_folder_results(self, snapshot: dict) -> None:
+        """把各文件夹结果画到概览页的表格里。"""
+        if not hasattr(self, "folder_tree"):
+            return
+        results = snapshot.get("folder_results") or []
+        if len(results) == self._folder_rows:
+            return
+        self._folder_rows = len(results)
+        self.folder_tree.delete(*self.folder_tree.get_children())
+        for item in results[-200:]:
+            self.folder_tree.insert("", "end", values=(
+                item.get("folder", ""),
+                item.get("status", ""),
+                item.get("archived", 0),
+                item.get("failed", 0),
+                (item.get("error_summary") or "")[:120],
+            ))
 
     def _set_busy(self, key: str, busy: bool, message: str = "") -> None:
         self._busy[key] = busy
@@ -468,7 +549,7 @@ class MainWindow:
 
     def _load_detail(self, message_id: str) -> None:
         self.var_detail_title.set("正在读取…")
-        self.var_detail_meta.set("")
+        self._set_header("")
         self.var_att_hint.set("")
         self._set_body("")
         self.att_tree.delete(*self.att_tree.get_children())
@@ -493,10 +574,10 @@ class MainWindow:
             self.var_detail_title.set(detail.error or "未找到该邮件")
             return
         self.var_detail_title.set(detail.subject or "(无主题)")
-        meta = [f"{k}：{v}" for k, v in detail.header_lines() if k != "主题"]
+        lines = [f"{k}：{v}" for k, v in detail.header_lines() if k != "主题"]
         if detail.body_truncated:
-            meta.append("（正文过长，仅显示前 20 万字符）")
-        self.var_detail_meta.set("\n".join(meta))
+            lines.append("（正文过长，仅显示前 20 万字符）")
+        self._set_header("\n".join(lines))
         self._set_body(detail.body)
 
         self._attachments = detail.attachments
@@ -511,6 +592,86 @@ class MainWindow:
             )
         else:
             self.var_att_hint.set("这封邮件没有附件")
+
+    def _set_header(self, text: str) -> None:
+        self.header_text.configure(state="normal")
+        self.header_text.delete("1.0", "end")
+        self.header_text.insert("1.0", text)
+        self.header_text.configure(state="disabled")
+        self.header_text.yview_moveto(0)
+
+    def _build_log(self, parent: ttk.Frame) -> None:
+        """日志标签页：直接看同步事件，不必再开终端。"""
+        bar = ttk.Frame(parent)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="刷新", command=self._refresh_log).pack(side="left")
+        ttk.Button(bar, text="打开日志文件", command=self._on_open_log_file).pack(
+            side="left", padx=(6, 0)
+        )
+        self.var_log_hint = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.var_log_hint, foreground="#666").pack(
+            side="left", padx=(10, 0)
+        )
+        self.autoscroll = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="自动滚动", variable=self.autoscroll).pack(side="right")
+
+        box = ttk.Frame(parent)
+        box.pack(fill="both", expand=True, pady=(8, 0))
+        self.log_text = tk.Text(box, wrap="none", height=20, relief="solid", borderwidth=1)
+        scroll = ttk.Scrollbar(box, orient="vertical", command=self.log_text.yview)
+        hscroll = ttk.Scrollbar(parent, orient="horizontal", command=self.log_text.xview)
+        self.log_text.configure(yscrollcommand=scroll.set, xscrollcommand=hscroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        hscroll.pack(fill="x")
+        self.log_text.configure(state="disabled")
+        self._log_lines = 0
+
+    def _on_tab_changed(self, _event: Any = None) -> None:
+        try:
+            current = self.notebook.index("current")
+        except Exception:  # noqa: BLE001
+            return
+        if current == 2:
+            self._refresh_log()
+
+    def _refresh_log(self) -> None:
+        """把日志文件尾部读进来（而不是重造一套日志通道）。"""
+        path = self.config.log_path / "email-assistant.log"
+        text = ""
+        try:
+            if path.is_file():
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()[-500:]
+                text = "".join(lines)
+        except OSError as exc:
+            text = f"读取日志失败：{exc}"
+
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.insert("1.0", text or "（暂无日志）")
+        self.log_text.configure(state="disabled")
+        if self.autoscroll.get():
+            self.log_text.see("end")
+        self.var_log_hint.set(f"{path}")
+        self._log_lines = len(text.splitlines())
+
+    def _on_open_log_file(self) -> None:
+        from ..tray_app import open_local_path
+
+        open_local_path(self.config.log_path)
+
+    def _on_show_where(self) -> None:
+        """数据目录在哪 —— 升级/备份前最需要知道的信息。"""
+        from ..data_root import describe_paths
+
+        report = describe_paths(self.config)
+        try:
+            from tkinter import messagebox
+
+            messagebox.showinfo("数据位置", report.render(), parent=self.root)
+        except Exception:  # noqa: BLE001
+            logger.info("数据位置：\n%s", report.render())
 
     def _set_body(self, text: str) -> None:
         self.body_text.configure(state="normal")
@@ -632,5 +793,11 @@ def main_window_command(config_path: str | None = None, *, autosync: bool = Fals
         prefix = ["--config", str(config_path)]
     tail = ["_main-gui"] + (["--sync"] if autosync else [])
     if is_frozen():
+        # 打包后优先用**无控制台**的孪生程序，否则在 Windows 上会闪出黑终端
+        from . import windowed_command
+
+        twin = windowed_command([*prefix, *tail])
+        if twin is not None:
+            return twin
         return [sys.executable, *prefix, *tail]
     return [sys.executable, str(SOURCE_ROOT / "main.py"), *prefix, *tail]

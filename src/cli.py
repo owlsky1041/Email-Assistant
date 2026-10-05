@@ -703,6 +703,78 @@ def cmd_main_gui(args: argparse.Namespace) -> int:
         context.close()
 
 
+def cmd_where(args: argparse.Namespace) -> int:
+    """显示配置 / 数据 / 日志的实际位置。
+
+    升级前想知道"我的数据在哪、要备份什么"，这条命令就够了。
+    """
+    from .data_root import candidate_roots, describe_paths
+
+    context = _load_context(args, quiet=True)
+    try:
+        config = context.config
+        if getattr(args, "json", False):
+            report = describe_paths(config)
+            print(json.dumps({
+                "config": str(config.source_path or "(默认位置)"),
+                "root": str(report.root),
+                "paths": {label: str(path) for label, path, _ in report.entries},
+                "has_database": report.has_database,
+                "messages": report.message_count,
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        info(f"配置文件  ：{config.source_path or '(默认位置)'}")
+        print()
+        print(describe_paths(config).render())
+
+        others = candidate_roots(config)
+        if others:
+            print()
+            warn("另外发现这些目录也像是有归档，升级后如果界面是空的，")
+            warn("很可能是数据在这里：")
+            for path in others:
+                warn(f"  · {path}")
+            info("")
+            info("接上它（只改配置，不动任何文件）：")
+            info(f"  python main.py data use \"{others[0]}\"")
+        return 0
+    finally:
+        context.close()
+
+
+def cmd_data_use(args: argparse.Namespace) -> int:
+    """把配置指向一个已有的数据目录（升级不丢数据的主要手段）。"""
+    from .data_root import adopt_data_root
+
+    context = _load_context(args, quiet=True)
+    try:
+        target = args.path
+        if not target:
+            warn("请给出数据目录，例如：python main.py data use D:\\EmailAssistant\\data")
+            return 2
+        if not args.yes:
+            answer = input(
+                f"将把数据目录指向 {target}（只改配置，不搬动/删除任何文件）。继续？(y/N)："
+            ).strip().lower()
+            if answer != "y":
+                info("已取消")
+                return 0
+
+        result = adopt_data_root(context.config, target)
+        if not result.ok:
+            error(result.error)
+            return 1
+        ok(f"已接上已有数据：{result.root}")
+        info(f"  · 数据库中的邮件：{result.message_count} 封")
+        info("  · 未搬动、未删除任何文件；如需改回，重新指定目录即可")
+        if result.error:
+            warn(f"  · {result.error}")
+        return 0
+    finally:
+        context.close()
+
+
 def cmd_app(args: argparse.Namespace) -> int:
     """打开程序主窗口；没有图形界面时给出明确指引而不是报错退出。"""
     from .gui import window_available
@@ -1145,6 +1217,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_main = sub.add_parser("_main-gui", help=argparse.SUPPRESS)
     p_main.add_argument("--sync", action="store_true", help=argparse.SUPPRESS)
     p_main.set_defaults(func=cmd_main_gui)
+
+    p_where = sub.add_parser("where", help="显示配置/数据/日志的实际位置")
+    p_where.add_argument("--json", action="store_true")
+    p_where.set_defaults(func=cmd_where)
+
+    p_data = sub.add_parser("data", help="数据目录：查看与切换（升级不丢数据）")
+    data_sub = p_data.add_subparsers(dest="data_command")
+    p_use = data_sub.add_parser("use", help="把配置指向一个已有的数据目录")
+    p_use.add_argument("path", nargs="?", help="数据根目录（含 sqlite/mail.db）")
+    p_use.add_argument("--yes", "-y", action="store_true", help="跳过确认")
+    p_use.set_defaults(func=cmd_data_use)
 
     p_app = sub.add_parser("app", help="打开程序主窗口（状态面板 + 检索）")
     p_app.add_argument("--sync", action="store_true", help="打开后立刻同步一次")

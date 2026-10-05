@@ -30,6 +30,15 @@ def main() -> int:
 
     argv = sys.argv[1:]
     if not argv:
+        # 打包后会生成两个 EXE：控制台版（命令行）与无控制台版（图形界面）。
+        # 双击控制台版时不要在桌面弹一个黑终端，直接转交给无控制台的孪生程序。
+        # 源码运行 / 找不到孪生程序时退回原行为（启动托盘）。
+        from src.gui import is_windowed_build, spawn_detached, windowed_command
+
+        if not is_windowed_build():
+            command = windowed_command([])
+            if command is not None and spawn_detached(command):
+                return 0
         argv = ["tray"]
     return cli_main(argv)
 
