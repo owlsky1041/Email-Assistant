@@ -136,8 +136,9 @@ class TestControlChannel:
         assert guard.acquire()
         try:
             guard.serve(lambda a: called.append(a) or {"ok": True})
-            meta = json.loads((tmp_path / APP_LOCK_NAME).read_text(encoding="utf-8"))
-            port = int(meta["port"])
+            from src.single_instance import read_meta
+
+            port = int(read_meta(tmp_path / APP_LOCK_NAME)["port"])
 
             with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
                 sock.sendall((json.dumps({"action": "open-main", "token": "错误令牌"}) + "\n").encode())
@@ -161,7 +162,9 @@ class TestControlChannel:
         probe.bind(("127.0.0.1", 0))
         dead_port = probe.getsockname()[1]
         probe.close()
-        lock.write_text(json.dumps({"port": dead_port, "token": "x"}), encoding="utf-8")
+        from src.single_instance import write_meta
+
+        write_meta(lock, {"port": dead_port, "token": "x"})
 
         start = time.time()
         result = send_to_running(lock, "open-main", timeout=1.0)
@@ -175,3 +178,45 @@ class TestHandOff:
         guard = SingleInstance(tmp_path / APP_LOCK_NAME)
         result = guard.hand_off("open-main")
         assert result["ok"] is False
+
+
+class TestMetaFile:
+    """元数据必须写在**独立的文件**里，不能塞进被锁住的那个。
+
+    回归：Windows 的 msvcrt.locking 锁的是一个字节区间，对被锁区间做
+    truncate/写入在部分环境会失败 —— 表现是"锁住了但控制端口写不进去"，
+    于是第二次启动永远找不到正在运行的实例（CI 上 4 个用例同时红）。
+    """
+
+    def test_meta_lives_in_a_separate_file(self, tmp_path: Path) -> None:
+        from src.single_instance import meta_path_for
+
+        lock = tmp_path / APP_LOCK_NAME
+        assert meta_path_for(lock) != lock
+        assert meta_path_for(lock).name.startswith(APP_LOCK_NAME)
+
+    def test_meta_readable_while_lock_held(self, tmp_path: Path) -> None:
+        from src.single_instance import read_meta
+
+        lock_path = tmp_path / APP_LOCK_NAME
+        guard = SingleInstance(lock_path)
+        assert guard.acquire()
+        try:
+            guard.serve(lambda a: {"ok": True})
+            meta = read_meta(lock_path)
+            assert meta.get("port"), f"锁生效期间必须能读到控制端口：{meta}"
+            assert meta.get("token")
+        finally:
+            guard.close()
+
+    def test_meta_cleared_on_close(self, tmp_path: Path) -> None:
+        from src.single_instance import meta_path_for, read_meta
+
+        lock_path = tmp_path / APP_LOCK_NAME
+        guard = SingleInstance(lock_path)
+        assert guard.acquire()
+        guard.serve(lambda a: {"ok": True})
+        assert read_meta(lock_path).get("port")
+        guard.close()
+        assert not meta_path_for(lock_path).exists()
+        assert read_meta(lock_path) == {}

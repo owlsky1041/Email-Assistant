@@ -96,33 +96,48 @@ class _FileLock:
                 pass
             self._fh = None
 
-    # ---- 锁文件里的元数据（端口 / 令牌）----
+def meta_path_for(lock_path: Path) -> Path:
+    """锁文件对应的元数据文件。
 
-    def write_meta(self, data: dict[str, Any]) -> None:
-        if self._fh is None:
-            return
-        try:
-            self._fh.seek(0)
-            self._fh.truncate()
-            self._fh.write(json.dumps(data))
-            self._fh.flush()
-            os.fsync(self._fh.fileno())
-        except OSError:
-            logger.debug("写入锁文件元数据失败", exc_info=True)
+    为什么**不写进锁文件本身**：Windows 的 ``msvcrt.locking`` 锁的是一个
+    字节区间，对该区间做 ``truncate``/写入在部分环境会失败 —— 表现是
+    "锁住了但端口写不进去"，于是第二次启动永远找不到正在运行的实例。
+    锁与元数据分成两个文件，互不干扰。
+    """
+    return Path(str(lock_path) + ".json")
 
-    def read_meta(self) -> dict[str, Any]:
-        """读取锁文件内容（**不经由本对象的句柄**，避免读到自己的缓冲）。"""
+
+def write_meta(lock_path: Path, data: dict[str, Any]) -> None:
+    """写入端口/令牌（原子替换，权限 0600）。"""
+    target = meta_path_for(lock_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+    except OSError:
+        logger.debug("写入实例元数据失败", exc_info=True)
         try:
-            text = self.path.read_text(encoding="utf-8").strip()
+            tmp.unlink(missing_ok=True)
         except OSError:
-            return {}
-        if not text:
-            return {}
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        return data if isinstance(data, dict) else {}
+            pass
+
+
+def read_meta(lock_path: Path) -> dict[str, Any]:
+    """读取端口/令牌；不存在或损坏时返回空字典。"""
+    try:
+        text = meta_path_for(lock_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 class ControlServer:
@@ -135,13 +150,13 @@ class ControlServer:
         self._stop = threading.Event()
         self.port = 0
         self.token = ""
-        self._lock = None
+        self._lock_path: Path | None = None
 
-    def start(self, *, lock: _FileLock | None = None) -> int:
+    def start(self, *, lock_path: Path | None = None) -> int:
         import secrets
 
         self.token = secrets.token_urlsafe(24)
-        self._lock = lock
+        self._lock_path = Path(lock_path) if lock_path is not None else None
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", 0))
@@ -153,8 +168,11 @@ class ControlServer:
         self._thread = threading.Thread(target=self._serve, name="instance-control", daemon=True)
         self._thread.start()
 
-        if lock is not None:
-            lock.write_meta({"port": self.port, "token": self.token, "pid": os.getpid()})
+        if self._lock_path is not None:
+            write_meta(
+                self._lock_path,
+                {"port": self.port, "token": self.token, "pid": os.getpid()},
+            )
         logger.debug("实例控制通道已监听 127.0.0.1:%s", self.port)
         return self.port
 
@@ -227,7 +245,7 @@ def send_to_running(lock_path: Path, action: str, *, timeout: float = CONTROL_TI
 
     :return: ``{"ok": bool, ...}``；连不上时 ``ok`` 为 ``False``。
     """
-    meta = _FileLock(lock_path).read_meta()
+    meta = read_meta(lock_path)
     port = meta.get("port")
     token = meta.get("token")
     if not port or not token:
@@ -280,12 +298,16 @@ class SingleInstance:
     def serve(self, handler: Callable[[str], dict[str, Any]]) -> int:
         """作为主实例开始接受控制指令，返回监听端口。"""
         self._server = ControlServer(handler)
-        return self._server.start(lock=self._lock)
+        return self._server.start(lock_path=self.lock_path)
 
     def close(self) -> None:
         if self._server is not None:
             self._server.stop()
             self._server = None
-        self._lock.write_meta({})
+        # 元数据一并清掉：留着过期的端口只会让下一次启动白等一次连接超时
+        try:
+            meta_path_for(self.lock_path).unlink(missing_ok=True)
+        except OSError:
+            pass
         self._lock.release()
         self.is_primary = False
