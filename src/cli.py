@@ -690,18 +690,31 @@ def cmd_main_gui(args: argparse.Namespace) -> int:
     与 ``_settings-gui`` 一样是独立子进程入口：托盘菜单跑在 pystray 线程里，
     而 tkinter 只能在主线程创建窗口。
     """
+    from .config import AppConfig
     from .gui import window_available
     from .gui.main_window import run_main_window
+    from .single_instance import WINDOW_LOCK_NAME, SingleInstance
 
     if not window_available():
         print("ERROR: 当前环境没有图形界面", file=sys.stderr)
         return 3
+
+    # 窗口锁：托盘点快了也不会叠出一堆窗口和一堆数据库连接。
+    # **不抢应用锁** —— 这个进程是托盘主实例派生出来的助手，抢了必然失败。
+    window_lock_path = AppConfig.resolve(WINDOW_LOCK_NAME)
+    window_guard = SingleInstance(window_lock_path)
+    if not window_guard.acquire():
+        # 已有窗口：把它提到前台，而不是再盖一个
+        window_guard.hand_off("raise")
+        info("主窗口已经打开了，已把它切到前台。")
+        return 0
 
     context = _load_context(args, quiet=True)
     try:
         return run_main_window(context, autosync=bool(getattr(args, "sync", False)))
     finally:
         context.close()
+        window_guard.close()
 
 
 def cmd_where(args: argparse.Namespace) -> int:
@@ -791,7 +804,26 @@ def cmd_app(args: argparse.Namespace) -> int:
 
     context = _load_context(args, quiet=True)
     try:
-        return run_main_window(context, autosync=bool(getattr(args, "sync", False)))
+        # 已有实例在跑时，把"打开主窗口"交给它 —— 用户要的是
+        # "同时只能运行一个客户端"，不是再起一个进程去抢数据库和向量库。
+        # 这里用**窗口锁**：`app` 这个入口等价于"我要那个主窗口"。
+        # 已经有窗口时，把请求转成"提到前台"，不再起第二个客户端。
+        from .config import AppConfig
+        from .single_instance import WINDOW_LOCK_NAME, SingleInstance
+
+        guard = SingleInstance(AppConfig.resolve(WINDOW_LOCK_NAME))
+        if not guard.acquire():
+            guard.hand_off("raise")
+            info("程序已在运行，已把主窗口切到前台。")
+            return 0
+        try:
+            return run_main_window(
+                context,
+                autosync=bool(getattr(args, "sync", False)),
+                window_guard=guard,
+            )
+        finally:
+            guard.close()
     finally:
         context.close()
 
@@ -846,15 +878,51 @@ def cmd_settings(args: argparse.Namespace) -> int:
         context.close()
 
 
+def _instance_lock_path(context: AppContext) -> "Path":
+    """应用级锁文件放在运行根目录（跟随 EMAIL_ASSISTANT_HOME）。
+
+    走 ``AppConfig.resolve`` 而不是直接拼运行根常量：它是项目里唯一的
+    路径解析入口，绿色版/多实例用户换目录时锁也跟着走。
+    """
+    from .config import AppConfig
+
+    return AppConfig.resolve(".app.lock")
+
+
+def _guard_single_instance(context: AppContext, *, action: str) -> "SingleInstance | None":
+    """抢单实例锁；抢不到就把 ``action`` 交给已在运行的实例并返回 None。
+
+    调用方拿到 None 就该直接退出（返回 0）—— 用户要的是"只允许一个客户端"，
+    而不是再起一个进程跟已有实例抢数据库和向量库。
+    """
+    from .single_instance import SingleInstance
+
+    guard = SingleInstance(_instance_lock_path(context))
+    if guard.acquire():
+        return guard
+
+    result = guard.hand_off(action)
+    if result.get("ok"):
+        info("程序已在运行，已把请求交给它。")
+    else:
+        warn(f"程序已在运行，无法转交请求：{result.get('error')}")
+        info("请使用托盘图标或关闭已有窗口后重试。")
+    return None
+
+
 def cmd_tray(args: argparse.Namespace) -> int:
     from .cancellation import install_signal_handlers
 
     context = _load_context(args)
     token = install_signal_handlers(context.cancel)
+    guard = _guard_single_instance(context, action="open-main")
+    if guard is None:
+        context.close()
+        return 0
     try:
         from .tray_app import run_tray
 
-        return run_tray(context, with_api=not args.no_api)
+        return run_tray(context, with_api=not args.no_api, instance_guard=guard)
     except KeyboardInterrupt:
         info("")
         info("正在关闭…")

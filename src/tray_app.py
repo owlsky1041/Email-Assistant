@@ -169,8 +169,11 @@ class TrayApplication:
         *,
         cancel_token: CancellationToken | None = None,
         with_api: bool = True,
+        instance_guard: Any = None,
     ) -> None:
         self.context = context
+        #: 单实例守卫；作为主实例时用它开控制通道，接住第二次启动的请求
+        self.instance_guard = instance_guard
         self.config: AppConfig = context.config
         self.cancel = cancel_token or get_cancellation_token()
         self.with_api = with_api
@@ -185,6 +188,7 @@ class TrayApplication:
     # ------------------------------------------------------------------
 
     def run(self) -> int:
+        self._start_control_channel()
         self.scheduler.start()
         if self.with_api:
             self.start_api_process()
@@ -235,6 +239,38 @@ class TrayApplication:
         if available is None:
             return True  # 判断不了就交给 pystray 自己试
         return available
+
+    def _start_control_channel(self) -> None:
+        """作为主实例接收第二次启动的请求。
+
+        用户双击托盘图标 / 再次运行程序时，我们不去起第二个客户端
+        （两个进程抢数据库与向量库在 Windows 上会直接崩），而是让对方
+        把"打开主窗口"这个意图发过来，由本进程打开。
+        """
+        if self.instance_guard is None:
+            return
+        handlers = {
+            "open-main": self._action_open_main,
+            "open-settings": self._action_open_settings,
+            "sync": self._action_sync,
+        }
+
+        def handle(action: str) -> dict[str, Any]:
+            if action == "ping":
+                return {"ok": True, "pid": os.getpid()}
+            func = handlers.get(action)
+            if func is None:
+                return {"ok": False, "error": f"未知动作：{action}"}
+            # 控制通道跑在独立线程，而这些动作本来就在别的线程里被调用过
+            # （pystray 线程），因此可以安全地在这里调用。
+            func()
+            return {"ok": True, "action": action}
+
+        try:
+            port = self.instance_guard.serve(handle)
+            logger.info("已启用单实例控制通道（127.0.0.1:%s）", port)
+        except OSError as exc:
+            logger.warning("无法启用单实例控制通道：%s", exc)
 
     def _run_headless(self) -> int:
         try:
@@ -311,6 +347,11 @@ class TrayApplication:
 
     def shutdown(self) -> None:
         logger.info("正在退出…")
+        if self.instance_guard is not None:
+            try:
+                self.instance_guard.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("释放单实例锁失败", exc_info=True)
         self.cancel.cancel("托盘退出")
         self.scheduler.shutdown(wait=False)
         self.stop_api_process()
@@ -642,6 +683,8 @@ class TrayApplication:
         logger.info("%s", message)
 
 
-def run_tray(context: AppContext, *, with_api: bool = True) -> int:
-    app = TrayApplication(context, with_api=with_api)
+def run_tray(
+    context: AppContext, *, with_api: bool = True, instance_guard: Any = None
+) -> int:
+    app = TrayApplication(context, with_api=with_api, instance_guard=instance_guard)
     return app.run()

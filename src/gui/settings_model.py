@@ -58,6 +58,7 @@ DEFAULT_ENDPOINT = "https://hf-mirror.com"
 BACKEND_LABELS: dict[str, str] = {
     "auto": "自动（优先 ONNX，失败逐级降级）",
     "onnx": "ONNX Runtime（推荐，无需 PyTorch）",
+    "ollama": "Ollama 本地模型（需先运行 ollama serve）",
     "sentence-transformers": "sentence-transformers（需要 PyTorch）",
     "hashing": "hashing（占位，无真实语义，仅供离线演示）",
 }
@@ -151,6 +152,9 @@ class SettingsDraft:
     embedding_backend: str = "auto"
     model_repo: str = SUGGESTED_REPOS[0]
     model_endpoint: str = DEFAULT_ENDPOINT
+    # 选 backend=ollama 时用这两项
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "nomic-embed-text"
 
     # ---- 只读展示用 ----
     auth_code_present: bool = False
@@ -181,6 +185,8 @@ class SettingsDraft:
             embedding_backend=config.embedding.backend,
             model_repo=config.embedding.onnx_repo,
             model_endpoint=config.embedding.onnx_endpoint,
+            ollama_url=config.embedding.ollama_url,
+            ollama_model=config.embedding.ollama_model,
             auth_code_present=auth_code_present,
             auth_backend=auth_backend,
         )
@@ -268,6 +274,8 @@ class SettingsDraft:
                 "backend": self.embedding_backend,
                 "onnx_repo": self.model_repo.strip(),
                 "onnx_endpoint": self.model_endpoint.strip() or DEFAULT_ENDPOINT,
+                "ollama_url": self.ollama_url.strip() or "http://127.0.0.1:11434",
+                "ollama_model": self.ollama_model.strip() or "nomic-embed-text",
                 "model_dir": paths["model_dir"],
             },
         }

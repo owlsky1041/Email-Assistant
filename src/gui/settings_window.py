@@ -390,6 +390,23 @@ class SettingsWindow:
         combo.bind("<<ComboboxSelected>>", lambda *_: self._refresh_backend_hint())
         self._refresh_backend_hint()
 
+        # Ollama 参数：只有选 ollama 时才需要填，但仍一直显示并给出说明
+        self.var_ollama_url = tk.StringVar(value=self.draft.ollama_url)
+        self.var_ollama_model = tk.StringVar(value=self.draft.ollama_model)
+        ollama_row = ttk.LabelFrame(tab, text="Ollama（backend 选 ollama 时生效）", padding=8)
+        ollama_row.pack(fill="x", pady=(10, 0))
+        ollama_row.columnconfigure(1, weight=1)
+        ttk.Label(ollama_row, text="服务地址").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(ollama_row, textvariable=self.var_ollama_url).grid(row=0, column=1, sticky="ew")
+        ttk.Label(ollama_row, text="模型名").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(6, 0))
+        ttk.Entry(ollama_row, textvariable=self.var_ollama_model).grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        ttk.Button(ollama_row, text="测试连接", command=self._on_test_ollama).grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
+        )
+        self.var_ollama_status = tk.StringVar(value="")
+        ttk.Label(ollama_row, textvariable=self.var_ollama_status, foreground="#555",
+                  wraplength=520, justify="left").grid(row=2, column=1, sticky="w", pady=(8, 0))
+
         ttk.Separator(tab).pack(fill="x", pady=14)
 
         ttk.Label(tab, text="模型状态").pack(anchor="w")
@@ -554,6 +571,8 @@ class SettingsWindow:
             embedding_backend=self.var_backend.get(),
             model_repo=self.var_repo.get(),
             model_endpoint=self.var_endpoint.get(),
+            ollama_url=self.var_ollama_url.get(),
+            ollama_model=self.var_ollama_model.get(),
         )
 
     def _on_test(self) -> None:
@@ -664,6 +683,27 @@ class SettingsWindow:
             self._post(lambda: self._on_model_done(status))
 
         threading.Thread(target=work, name="settings-model-import", daemon=True).start()
+
+    def _on_test_ollama(self) -> None:
+        """探测 Ollama：地址通不通、模型在不在、维度是多少。"""
+        url = self.var_ollama_url.get().strip() or "http://127.0.0.1:11434"
+        model = self.var_ollama_model.get().strip() or "nomic-embed-text"
+        self.var_ollama_status.set("正在连接…")
+
+        def work() -> None:
+            try:
+                from ..embedder import OllamaEmbedder
+
+                embedder = OllamaEmbedder(model, base_url=url, timeout=15.0)
+                text = (
+                    f"✓ 可用：{model}，{embedder.dimension} 维"
+                )
+                self._post(lambda: self.var_ollama_status.set(text))
+            except Exception as exc:  # noqa: BLE001 - 失败原因原样展示
+                message = str(exc)
+                self._post(lambda: self.var_ollama_status.set(f"✗ {message[:180]}"))
+
+        threading.Thread(target=work, name="ollama-probe", daemon=True).start()
 
     def _on_model_failed(self, message: str) -> None:
         self._set_busy(False, "")

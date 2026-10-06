@@ -268,6 +268,133 @@ class OnnxEmbedder(Embedder):
 # SentenceTransformer 后端
 # ---------------------------------------------------------------------------
 
+class OllamaEmbedder(Embedder):
+    """通过本机 Ollama 服务做嵌入。
+
+    为什么单独做一个后端
+    --------------------
+    ONNX 后端要求用户事先把模型导出成 onnx；SentenceTransformer 要拖 PyTorch。
+    而 Ollama 用户往往已经跑着本地模型（``nomic-embed-text`` / ``bge-m3`` 等），
+    直接复用比再装一套运行时省事得多，而且是**纯 HTTP**，不引入任何新依赖。
+
+    走 ``POST /api/embed``（新版）并回退到 ``POST /api/embeddings``（旧版），
+    这样 0.x 各版本都能用。
+    """
+
+    name = "ollama"
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        base_url: str = "http://127.0.0.1:11434",
+        timeout: float = 60.0,
+        batch_size: int = 16,
+        query_prefix: str = "",
+        cancel_token: CancellationToken | None = None,
+    ) -> None:
+        self.model = model or "nomic-embed-text"
+        self.base_url = (base_url or "http://127.0.0.1:11434").rstrip("/")
+        self.timeout = float(timeout)
+        self.batch_size = max(1, int(batch_size))
+        self.query_prefix = query_prefix or ""
+        self.cancel = cancel_token or get_cancellation_token()
+        self._batch_endpoint = "/api/embed"
+        self.dimension = self._probe_dimension()
+
+    # ---- HTTP ----
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        import json
+        import urllib.error
+        import urllib.request
+
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:200]
+            except Exception:  # noqa: BLE001
+                pass
+            raise EmbedderError(f"Ollama 返回 HTTP {exc.code}：{detail}") from exc
+        except urllib.error.URLError as exc:
+            raise EmbedderError(
+                f"连不上 Ollama（{self.base_url}）：{exc.reason}。"
+                "请确认 `ollama serve` 正在运行。"
+            ) from exc
+        except OSError as exc:
+            raise EmbedderError(f"请求 Ollama 失败：{exc}") from exc
+
+    def _probe_dimension(self) -> int:
+        """用一次真实请求确定维度 —— 不同模型差别很大，猜不得。"""
+        payload = self._embed_vectors(["维度探测"])
+        if not payload:
+            raise EmbedderError(f"Ollama 模型 {self.model} 没有返回向量")
+        return len(payload[0])
+
+    def _embed_vectors(self, texts: Sequence[str]) -> list[list[float]]:
+        """调 Ollama 取向量，自动适配新旧两套接口。"""
+        if self._batch_endpoint == "/api/embed":
+            try:
+                data = self._post("/api/embed", {"model": self.model, "input": list(texts)})
+                vectors = data.get("embeddings")
+                if isinstance(vectors, list) and vectors:
+                    return [[float(x) for x in v] for v in vectors]
+                raise EmbedderError(f"Ollama /api/embed 响应缺少 embeddings：{str(data)[:150]}")
+            except EmbedderError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+                # 老版本 Ollama 没有 /api/embed，退回一次一个的旧接口
+                self._batch_endpoint = "/api/embeddings"
+                logger.info("Ollama 不支持 /api/embed，改用 /api/embeddings")
+
+        out: list[list[float]] = []
+        for text in texts:
+            data = self._post(
+                self._batch_endpoint, {"model": self.model, "prompt": text}
+            )
+            vector = data.get("embedding")
+            if not isinstance(vector, list) or not vector:
+                raise EmbedderError(f"Ollama 响应缺少 embedding：{str(data)[:150]}")
+            out.append([float(x) for x in vector])
+        return out
+
+    # ---- Embedder 接口 ----
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for start in range(0, len(texts), self.batch_size):
+            self.cancel.raise_if_cancelled()
+            batch = list(texts[start : start + self.batch_size])
+            if not batch:
+                continue
+            out.extend(self._embed_vectors(batch))
+        return out
+
+    def embed_query(self, text: str) -> list[float]:
+        prefix = self.query_prefix or ""
+        vectors = self._embed_vectors([f"{prefix}{text}"])
+        return vectors[0] if vectors else [0.0] * self.dimension
+
+    def health(self) -> dict[str, object]:
+        info = super().health()
+        info.update({"model": self.model, "base_url": self.base_url})
+        return info
+
+    @property
+    def backend_id(self) -> str:
+        return f"ollama:{self.model}:{self.dimension}"
+
+
 class SentenceTransformerEmbedder(Embedder):
     """sentence-transformers 后端（体积大，兼容性最好）。"""
 
@@ -345,6 +472,10 @@ def create_embedder(
         attempts.append("onnx")
     if preferred in ("auto", "sentence-transformers"):
         attempts.append("sentence-transformers")
+    # ollama **不放进 auto 降级链**：它需要用户自己先跑起 ollama serve，
+    # 自动去试只会在没装的人机器上白等一次超时。只有显式选择才用它。
+    if preferred == "ollama":
+        attempts.append("ollama")
     attempts.append("hashing")
 
     errors: list[str] = []
@@ -360,6 +491,22 @@ def create_embedder(
                 )
                 logger.info("嵌入后端：ONNX（%s，%d 维）", config.model_path, embedder.dimension)
                 return embedder
+            if backend == "ollama":
+                embedder = OllamaEmbedder(
+                    cfg.ollama_model,
+                    base_url=cfg.ollama_url,
+                    timeout=cfg.ollama_timeout,
+                    batch_size=cfg.batch_size,
+                    query_prefix=cfg.query_prefix,
+                    cancel_token=token,
+                )
+                logger.info(
+                    "嵌入后端：Ollama（%s @ %s，%d 维）",
+                    cfg.ollama_model,
+                    cfg.ollama_url,
+                    embedder.dimension,
+                )
+                return embedder
             if backend == "sentence-transformers":
                 embedder = SentenceTransformerEmbedder(
                     cfg.model,
@@ -372,13 +519,17 @@ def create_embedder(
                 return embedder
             embedder = HashingEmbedder(dimension=cfg.dimension)
             if preferred != "hashing":
+                hint = (
+                    f"  * 检查 Ollama 是否在运行（{cfg.ollama_url}），"
+                    f"以及模型是否已拉取：ollama pull {cfg.ollama_model}"
+                    if preferred == "ollama"
+                    else "  * 如需真实语义检索，请安装 requirements-optional.txt 并导出 ONNX 模型：\n"
+                    f"      optimum-cli export onnx --model {cfg.model} {config.model_path}"
+                )
                 logger.warning(
-                    "未能加载本地嵌入模型，已降级为 hashing 兜底后端。\n"
-                    "  * 语义检索质量将显著下降（退化为词法相似度）；\n"
-                    "  * 如需真实语义检索，请安装 requirements-optional.txt 并导出 ONNX 模型：\n"
-                    "      optimum-cli export onnx --model %s %s",
-                    cfg.model,
-                    config.model_path,
+                    "未能加载嵌入模型，已降级为 hashing 兜底后端。\n"
+                    "  * 语义检索质量将显著下降（退化为词法相似度）；\n%s",
+                    hint,
                 )
                 for err in errors:
                     logger.warning("  - 尝试失败：%s", err)

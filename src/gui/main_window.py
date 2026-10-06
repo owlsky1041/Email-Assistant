@@ -76,9 +76,19 @@ class MainWindow:
     :param autosync: 打开窗口时是否立刻跑一次增量同步。
     """
 
-    def __init__(self, context: Any, *, autosync: bool = False) -> None:
+    def __init__(
+        self,
+        context: Any,
+        *,
+        autosync: bool = False,
+        window_guard: Any = None,
+    ) -> None:
         self.context = context
         self.config: AppConfig = context.config
+        #: 窗口级单实例守卫。有它时本窗口会开一个控制通道，
+        #: 第二个"打开主窗口"请求会被转成"把已有窗口提到前台"，
+        #: 而不是再盖一个新窗口。
+        self.window_guard = window_guard
         self._closed = False
         self._results: queue.Queue[Callable[[], None]] = queue.Queue()
         self._busy = {"sync": False, "search": False, "detail": False}
@@ -108,6 +118,7 @@ class MainWindow:
         self.root.after(POLL_INTERVAL_MS, self._pump)
         self._refresh_stats()
         self._refresh_log()
+        self._start_control_channel()
         if autosync:
             self.root.after(400, self._on_sync)
 
@@ -361,6 +372,42 @@ class MainWindow:
         ttk.Label(att_box, textvariable=self.var_att_hint, foreground="#666").pack(
             anchor="w", pady=(4, 0)
         )
+
+    def bring_to_front(self) -> None:
+        """把窗口提到前台（由控制通道在其它线程里排程调用）。"""
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(300, lambda: self.root.attributes("-topmost", False))
+            self.root.focus_force()
+        except Exception:  # noqa: BLE001 - 窗口可能正在销毁
+            logger.debug("提升窗口失败", exc_info=True)
+
+    def _start_control_channel(self) -> None:
+        """让"再点一次打开主窗口"变成"把已有窗口提到前台"。
+
+        托盘图标被连点、或者用户又双击了一次程序时，重复开窗口会叠出
+        一堆数据库连接；这里统一收敛成一个窗口。
+        """
+        if self.window_guard is None:
+            return
+
+        def handle(action: str) -> dict:
+            if action == "ping":
+                return {"ok": True, "pid": os.getpid()}
+            if action == "raise":
+                # 控制通道在自己的线程里，tkinter 只能由主线程碰，
+                # 因此排程到 Tk 的事件循环里执行。
+                self.root.after(0, self.bring_to_front)
+                return {"ok": True}
+            return {"ok": False, "error": f"未知动作：{action}"}
+
+        try:
+            port = self.window_guard.serve(handle)
+            logger.debug("主窗口控制通道：127.0.0.1:%s", port)
+        except OSError as exc:
+            logger.warning("主窗口无法启用控制通道：%s", exc)
 
     # ------------------------------------------------------------------
     # 线程协作
@@ -819,9 +866,11 @@ class MainWindow:
         return 0
 
 
-def run_main_window(context: Any, *, autosync: bool = False) -> int:
+def run_main_window(
+    context: Any, *, autosync: bool = False, window_guard: Any = None
+) -> int:
     """在当前（主）线程打开主窗口，阻塞到关闭。"""
-    return MainWindow(context, autosync=autosync).run()
+    return MainWindow(context, autosync=autosync, window_guard=window_guard).run()
 
 
 # ----------------------------------------------------------------------

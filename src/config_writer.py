@@ -76,7 +76,11 @@ clean:
   noise_tail_ratio: 0.3                # 只在邮件末尾 30% 内寻找噪音标记，避免误伤转发内容
 
 embedding:
-  backend: "auto"                      # auto | onnx | sentence-transformers | hashing
+  backend: "auto"                      # auto | onnx | ollama | sentence-transformers | hashing
+  # backend 选 ollama 时用下面三项（纯 HTTP，无需额外依赖，需先 ollama serve）
+  ollama_url: "http://127.0.0.1:11434"
+  ollama_model: "nomic-embed-text"      # 也可用 bge-m3 等
+  ollama_timeout: 60.0
   model: "BAAI/bge-small-zh-v1.5"          # sentence-transformers 用的仓库名
   # 下载 ONNX 模型时**单独**用下面这个仓库：很多官方仓库并不提供 model.onnx
   # （BAAI/bge-small-zh-v1.5 就没有），直接拿 model 去下载必然 404。

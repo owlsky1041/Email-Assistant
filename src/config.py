@@ -218,8 +218,13 @@ class CleanConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     """嵌入模型配置。"""
 
-    # auto | onnx | sentence-transformers | hashing
-    backend: Literal["auto", "onnx", "sentence-transformers", "hashing"] = "auto"
+    # auto | onnx | ollama | sentence-transformers | hashing
+    backend: Literal["auto", "onnx", "ollama", "sentence-transformers", "hashing"] = "auto"
+    #: 本地 Ollama 服务（backend=ollama 时使用）。纯 HTTP，不需要任何新依赖。
+    ollama_url: str = "http://127.0.0.1:11434"
+    #: Ollama 里的嵌入模型名，例如 nomic-embed-text / bge-m3 / qwen3-embedding
+    ollama_model: str = "nomic-embed-text"
+    ollama_timeout: float = 60.0
     model: str = "BAAI/bge-small-zh-v1.5"
     #: 下载 ONNX 模型时用的仓库，与 ``model`` 分开维护。
     #: ``model`` 是 sentence-transformers 的仓库名，而**很多官方仓库并不提供
